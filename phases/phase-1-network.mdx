@@ -1,0 +1,176 @@
+---
+title: "Phase 1 — Network Foundation"
+description: "VLAN configuration, firewall rules, and network segmentation"
+icon: "network-wired"
+---
+
+<Info>
+**Status:** Planned
+
+**Category:** Core Infrastructure
+</Info>
+
+## Objective
+
+Get the new switch in place, VLANs properly configured with firewall rules, and verify connectivity before any services move.
+
+## Entry Criteria
+
+<Check>
+  Phase 0 complete — all hardware racked and powered
+</Check>
+
+## VLAN Design
+
+| VLAN ID | Name | Subnet | Members & Purpose |
+|---------|------|--------|-------------------|
+| 10 | Management | 192.168.10.0/24 | Proxmox hosts, NAS management, UniFi switch, UDM-SE. Strict access — management devices only. |
+| 20 | Trusted | 192.168.20.0/24 | Personal laptops, phones, trusted devices. Current v2 services live here during migration — left untouched. |
+| 30 | Services | 192.168.30.0/24 | All v3 VMs and LXCs. docker-prod-01, auth-prod-01, immich-prod-01, PBS, AdGuard LXCs. |
+| 40 | IoT | 192.168.40.0/24 | Smart home devices, printers, anything untrusted. Internet access only. No inter-VLAN. |
+
+<Warning>
+**VLAN 1 Not Used**
+
+VLAN 1 (default untagged) will **NOT** be used as the management VLAN. A dedicated VLAN ID is assigned to management to avoid devices landing on it accidentally.
+</Warning>
+
+## IP Address Plan
+
+### VLAN 10 — Management (192.168.10.0/24)
+
+| Device | IP | Notes |
+|--------|-------|-------|
+| UDM-SE | 192.168.10.1 | Gateway — already configured |
+| Core Switch (UniFi) | 192.168.10.2 | Management interface |
+| nas-prod-01 (Unraid) | 192.168.10.10 | Management/NFS interface |
+| pve-prod-01 (MS-A2) | 192.168.10.11 | Proxmox management UI |
+| pve-prod-02 (Optiplex) | 192.168.10.12 | Proxmox management UI |
+| pi-prod-01 (Raspberry Pi) | 192.168.10.20 | QDevice + monitoring |
+
+### VLAN 30 — Services (192.168.30.0/24)
+
+| Device | IP | Notes |
+|--------|-------|-------|
+| dns-prod-01 (AdGuard LXC) | 192.168.30.10 | Primary DNS — AdGuard Home |
+| docker-prod-01 (media/apps VM) | 192.168.30.11 | All media stack containers behind Traefik |
+| pbs-prod-01 (PBS VM) | 192.168.30.12 | Proxmox Backup Server |
+| auth-prod-01 (Authentik VM) | 192.168.30.13 | Authentik IdP — dedicated VM |
+| immich-prod-01 (Immich VM) | 192.168.30.14 | Immich — isolated for resource tuning |
+| dns-prod-02 (AdGuard LXC) | 192.168.30.15 | Secondary DNS — synced from dns-prod-01 |
+
+## Tasks
+
+<Steps>
+  <Step title="Adopt New Switch">
+    - Adopt new UniFi switch into UDM-SE
+    - Assign static IP 192.168.10.2
+  </Step>
+  
+  <Step title="Create VLANs">
+    - VLAN 10 (Management, 192.168.10.0/24)
+    - VLAN 20 (Trusted, 192.168.20.0/24)
+    - VLAN 30 (Services, 192.168.30.0/24)
+    - VLAN 40 (IoT, 192.168.40.0/24)
+    - **Verify Management VLAN is NOT VLAN 1** — test and confirm in UniFi
+  </Step>
+  
+  <Step title="Assign Static IPs">
+    - UDM-SE at 192.168.10.1
+    - Switch at 192.168.10.2
+    - NAS at 192.168.10.10
+    - Proxmox nodes at 192.168.10.11 and 192.168.10.12
+    - Pi at 192.168.10.20
+  </Step>
+  
+  <Step title="Migrate IoT Devices">
+    Migrate 7 existing IoT devices from 192.168.30.0 → VLAN 40 (192.168.40.0/24)
+  </Step>
+  
+  <Step title="Configure VLAN Trunks">
+    Configure VLAN trunk ports to Proxmox hosts (MS-A2 and Optiplex)
+  </Step>
+  
+  <Step title="Configure Firewall Rules">
+    See Inter-VLAN Firewall Rules section below
+  </Step>
+  
+  <Step title="Validate Connectivity">
+    - Test: laptop on Trusted VLAN can reach Proxmox UI
+    - Test: IoT device cannot ping anything on Trusted or Services
+    - Test: Trusted VLAN can reach Services VLAN
+    - Test: Management VLAN only reachable from Trusted on specific ports (8006, 22, 443)
+  </Step>
+</Steps>
+
+## Inter-VLAN Firewall Rules
+
+Rules enforced at UDM-SE. **Default policy is DENY ALL inter-VLAN.** Explicit ALLOW rules only.
+
+| Source | Destination | Port / Protocol | Action | Reason |
+|--------|-------------|-----------------|--------|--------|
+| Trusted (20) | Services (30) | Any | ALLOW | Users reach internal services |
+| Trusted (20) | Management (10) | TCP 8006, 22, 443 | ALLOW | Admin access to Proxmox, SSH, NAS UI |
+| Services (30) | Services (30) | Any | ALLOW | Inter-service communication |
+| Services (30) | Trusted (20) | Any | DENY | Services cannot initiate to user devices |
+| Services (30) | Management (10) | Any | DENY | Services cannot touch infra management |
+| IoT (40) | Any internal | Any | DENY | IoT fully isolated from all internal VLANs |
+| Any | Internet | Any | ALLOW | All VLANs can reach WAN unless blocked |
+
+<Warning>
+**IoT Isolation**
+
+IoT VLAN has **Internet access only**. No inter-VLAN routing to Trusted, Services, or Management. Smart home devices cannot reach internal services.
+</Warning>
+
+## Validation Tests
+
+<Steps>
+  <Step title="Test 1: Trusted → Services">
+    From laptop on Trusted VLAN (192.168.20.x), ping future Services VLAN IPs (192.168.30.x). Should succeed.
+  </Step>
+  
+  <Step title="Test 2: Trusted → Management">
+    From laptop on Trusted VLAN, access Proxmox UI at https://192.168.10.11:8006. Should succeed.
+  </Step>
+  
+  <Step title="Test 3: IoT → Trusted">
+    From IoT device on VLAN 40, ping laptop on Trusted VLAN. Should fail (blocked by firewall).
+  </Step>
+  
+  <Step title="Test 4: IoT → Internet">
+    From IoT device on VLAN 40, ping 8.8.8.8. Should succeed.
+  </Step>
+  
+  <Step title="Test 5: Services → Management">
+    From future Services VLAN VM, attempt SSH to 192.168.10.10. Should fail (blocked by firewall).
+  </Step>
+</Steps>
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="All VLANs created and tagged correctly" icon="check">
+    - VLAN 10, 20, 30, 40 visible in UniFi
+    - Management VLAN is NOT VLAN 1
+    - DHCP enabled on each VLAN with correct subnet
+  </Accordion>
+  
+  <Accordion title="All firewall rules in place and validated" icon="shield-check">
+    - Default deny policy active
+    - All explicit ALLOW rules configured
+    - All 5 validation tests pass
+  </Accordion>
+  
+  <Accordion title="No unintended inter-VLAN routing" icon="ban">
+    - IoT VLAN cannot reach any internal VLAN
+    - Services VLAN cannot reach Management VLAN
+    - Services VLAN cannot initiate to Trusted VLAN
+  </Accordion>
+</AccordionGroup>
+
+## Next Phase
+
+<Card title="Phase 2 — NAS Build & Storage Commissioning" icon="hard-drive" href="/phases/phase-2-nas">
+  Unraid installation, pool creation, and NFS exports
+</Card>

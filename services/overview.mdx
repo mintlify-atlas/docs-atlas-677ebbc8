@@ -1,0 +1,139 @@
+---
+title: Service Overview
+description: Complete inventory of services running in the homelab v3.0 infrastructure
+---
+
+## Service Architecture
+
+All services in v3.0 run as Docker containers across three virtualized environments:
+
+- **docker-prod-01** (192.168.30.11) - Primary service VM hosting media, infrastructure, and application stacks
+- **auth-prod-01** (192.168.30.13) - Dedicated VM for Authentik identity provider
+- **immich-prod-01** (192.168.30.14) - Isolated VM for Immich photo management with ML workloads
+- **nas-prod-01** (Unraid) - Plex runs natively on the NAS for direct hardware transcoding access
+
+<CardGroup cols={2}>
+  <Card title="Infrastructure" icon="server" href="/services/infrastructure">
+    Reverse proxy, authentication, DNS, and tunneling services
+  </Card>
+  <Card title="Media" icon="film" href="/services/media">
+    Plex, ARR stack, and torrent automation
+  </Card>
+  <Card title="Books" icon="book" href="/services/books">
+    Ebook and audiobook library management
+  </Card>
+  <Card title="Photos" icon="camera" href="/services/photos">
+    Immich photo server with ML-powered organization
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/services/monitoring">
+    Host metrics, uptime tracking, and backup monitoring
+  </Card>
+</CardGroup>
+
+## Stack Organization
+
+Services are organized into logical stacks using Docker Compose:
+
+| Stack | Services | Location |
+|-------|----------|----------|
+| **infra** | Traefik, Dockman, Homarr | docker-prod-01 |
+| **auth** | Authentik (server, worker, PostgreSQL, Redis) | auth-prod-01 |
+| **cloudflared** | Cloudflare Tunnel | docker-prod-01 |
+| **dns-sync** | adguardhome-sync | docker-prod-01 |
+| **arr** | Sonarr (TV + Anime), Radarr (1080p + 4K), Prowlarr, Bazarr, Profilarr, Maintainerr, Seerr, Tautulli, Flaresolverr | docker-prod-01 |
+| **torrent** | Gluetun, qBittorrent, qBitrr | docker-prod-01 |
+| **books** | Audiobookshelf, Calibre-Web-Automated, Shelfmark | docker-prod-01 |
+| **photos** | Immich (server, ML, PostgreSQL, Redis) | immich-prod-01 |
+| **monitoring** | Beszel | docker-prod-01 |
+| **plex** | Plex Media Server | nas-prod-01 (Unraid native Docker) |
+
+## Access Model
+
+### Internal Access
+
+**All services accessible via Traefik reverse proxy:**
+- Protocol: HTTPS with wildcard certificate (`*.giohosted.com`)
+- DNS: AdGuard Home provides split-horizon DNS rewrites
+- Internal resolution: `service.giohosted.com` → Traefik at 192.168.30.11
+
+**Example internal URLs:**
+- `https://sonarr.giohosted.com`
+- `https://radarr.giohosted.com`
+- `https://plex.giohosted.com`
+
+### External Access
+
+**Cloudflare Tunnel (cloudflared):**
+- Audiobookshelf: `audiobooks.giohosted.com`
+- Shelfmark: `books.giohosted.com`
+- Seerr: `request.giohosted.com`
+- Authentik: `auth.giohosted.com`
+
+**Direct port forward:**
+- Plex: Port 32400 → nas-prod-01 (Cloudflare ToS prohibits video streaming)
+
+**WireGuard VPN:**
+- Full LAN access via UDM-SE WireGuard server
+- Used for remote administration and unrestricted service access
+
+## Service Identity
+
+All containers run as UID/GID `2000:2000` for consistent NFS permission management.
+
+## Storage Architecture
+
+**Docker VM local storage (`/opt`):**
+- `/opt/stacks/` - Git-tracked compose files
+- `/opt/appdata/` - Container persistent data (backed up nightly)
+
+**NAS NFS mount (`/data`):**
+- `/data/media/` - Plex libraries (movies, TV, anime, books)
+- `/data/downloads/` - Active torrent staging
+- `/data/photos/` - Immich library (ZFS mirror pool)
+- `/data/backups/` - Backup destinations (ZFS mirror pool)
+
+<Warning>
+Downloads and media shares MUST remain on the same filesystem (Unraid parity array) to support hardlinks used by ARR stack for atomic moves.
+</Warning>
+
+## Container Management
+
+**Dockman** provides web-based Docker Compose management:
+- Restart individual containers without affecting entire stack
+- View logs and resource usage
+- Access at `https://dockman.giohosted.com`
+
+**Cockpit** provides VM-level management:
+- Disk usage and network monitoring
+- System updates
+- File browser
+- Installed on docker-prod-01 for day-to-day operations
+
+## Backup Coverage
+
+| Tier | What | Tool | Destination |
+|------|------|------|-------------|
+| Tier 0 | VM/LXC snapshots | Proxmox Backup Server | pbs-prod-01 → NAS ZFS pool |
+| Tier 1 | Docker appdata + stacks | rsync + Healthchecks | NAS /backups (ZFS) |
+| Tier 1 | Plex database | Dedicated backup script | NAS /backups/plex |
+| Tier 2 | NAS snapshots | Unraid ZFS snapshots | Local on NAS |
+| Tier 3 | Off-box cold copy | Synology ABB | Synology NAS (nightly pull) |
+
+## Future: Kubernetes Migration
+
+Phase 6 (future) introduces k3s cluster for selective service migration:
+
+**Migration candidates:**
+- Immich (HA + operator-managed upgrades)
+- Authentik (IdP high availability)
+- Monitoring stack (Beszel, Uptime Kuma)
+- Traefik (natural fit as k3s ingress controller)
+
+**Intentionally staying in Docker:**
+- ARR stack (hardlinks and atomic moves incompatible with k8s storage)
+- qBittorrent + Gluetun (VPN killswitch model)
+- Books stack (filesystem-dependent ingest workflows)
+
+<Note>
+Kubernetes migration is sandbox-first approach. No production services move until cluster is proven stable in isolated lab environment.
+</Note>

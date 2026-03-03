@@ -1,0 +1,406 @@
+---
+title: Monitoring Services
+description: Host metrics, service uptime tracking, and backup job monitoring
+---
+
+## Overview
+
+Monitoring infrastructure provides visibility into host health, service availability, and backup job success across the entire homelab.
+
+<CardGroup cols={3}>
+  <Card title="Beszel" icon="chart-line">
+    Host and container metrics
+  </Card>
+  <Card title="Uptime Kuma" icon="heartbeat">
+    Service uptime monitoring
+  </Card>
+  <Card title="Healthchecks.io" icon="clipboard-check">
+    Backup job heartbeat monitoring
+  </Card>
+</CardGroup>
+
+---
+
+## Beszel
+
+**Purpose:** Lightweight host and container resource monitoring
+
+**Architecture:**
+- **Beszel server:** Runs on pi-prod-01 (192.168.10.20)
+- **Beszel agents:** Deployed on all hosts
+
+**Access:** `https://beszel.giohosted.com`
+
+### Monitored Hosts
+
+| Host | Type | Agent Location | Metrics |
+|------|------|----------------|----------|
+| pve-prod-01 | Proxmox | Native agent | CPU, RAM, disk, network |
+| pve-prod-02 | Proxmox | Native agent | CPU, RAM, disk, network |
+| nas-prod-01 | Unraid | Docker agent | CPU, RAM, disk, network, array status |
+| docker-prod-01 | VM | Docker agent | CPU, RAM, disk, containers |
+| auth-prod-01 | VM | Docker agent | CPU, RAM, disk, containers |
+| immich-prod-01 | VM | Docker agent | CPU, RAM, disk, containers |
+| pi-prod-01 | Raspberry Pi | Native agent | CPU, RAM, disk, network |
+
+### Features
+
+**System metrics:**
+- CPU usage (per core and aggregate)
+- Memory usage (used/available/cached)
+- Disk I/O and usage percentage
+- Network throughput (TX/RX)
+- System uptime
+
+**Container metrics (Docker hosts):**
+- Per-container CPU and memory usage
+- Container status (running/stopped)
+- Container count
+
+**Alerts:**
+- Configurable thresholds
+- Discord webhook notifications
+- Email alerts (optional)
+
+### Agent Deployment
+
+**Docker agent (for VMs and Unraid):**
+```yaml
+beszel-agent:
+  image: henrygd/beszel-agent
+  container_name: beszel-agent
+  restart: unless-stopped
+  network_mode: host
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+  environment:
+    PORT: 45876
+    KEY: <agent-key-from-server>
+```
+
+**Native agent (for Proxmox and Pi):**
+```bash
+curl -sL https://raw.githubusercontent.com/henrygd/beszel/main/supplemental/scripts/install-agent.sh | bash
+```
+
+### SSO Configuration
+
+**OIDC via Authentik:**
+
+<Warning>
+Beszel requires custom Authentik scope with `email_verified: true` claim. Without this, OIDC authentication will fail.
+</Warning>
+
+**Configuration steps:**
+1. Create custom scope in Authentik: `email_verified` with value `true`
+2. Add scope to Beszel OIDC provider
+3. Configure Beszel OAuth settings with Authentik endpoints
+4. Test login with admin account
+
+**Access:**
+- Dashboard: `https://beszel.giohosted.com`
+- API: `https://beszel.giohosted.com/api`
+
+---
+
+## Uptime Kuma
+
+**Purpose:** HTTP/HTTPS service availability monitoring
+
+**Location:** pi-prod-01 (192.168.10.20)
+
+**Access:** `https://uptime.giohosted.com`
+
+### Monitored Services
+
+**Internal services:**
+- Traefik (`https://traefik.giohosted.com`)
+- Plex (`https://plex.giohosted.com`)
+- Sonarr, Radarr, Prowlarr (all ARR services)
+- Audiobookshelf, Calibre-Web-Automated, Shelfmark
+- Immich
+- Authentik
+- AdGuard Home (dns-prod-01 and dns-prod-02)
+- Proxmox (pve-prod-01 and pve-prod-02)
+
+**External services:**
+- `audiobooks.giohosted.com` (via Cloudflare Tunnel)
+- `books.giohosted.com` (via Cloudflare Tunnel)
+- `request.giohosted.com` (via Cloudflare Tunnel)
+- `auth.giohosted.com` (via Cloudflare Tunnel)
+
+### Monitor Types
+
+**HTTP(S) monitoring:**
+- Status code checking (expect 200, 301, etc.)
+- Response time tracking
+- SSL certificate expiration alerts
+- Keyword presence/absence validation
+
+**TCP port monitoring:**
+- Port 32400 (Plex external)
+- Port 22 (SSH on critical hosts)
+
+**Ping monitoring:**
+- Host reachability
+- Network latency
+
+### Notification Channels
+
+**Discord webhook:**
+- Service down alerts
+- Service recovery notifications
+- SSL certificate expiration warnings
+
+**Configuration:**
+- Check interval: 60 seconds (critical services), 300 seconds (non-critical)
+- Retry: 3 attempts before marking down
+- Timeout: 10 seconds per request
+
+### Status Page
+
+**Public status page (optional):**
+- Accessible at custom URL
+- Shows current status of monitored services
+- Historical uptime percentages
+- No authentication required (read-only)
+
+**Access:**
+- Admin panel: `https://uptime.giohosted.com` (local only, no SSO)
+- Status page: Can be configured for public access
+
+<Note>
+Uptime Kuma intentionally does NOT have SSO. It is LAN-only for admin access, with optional public status page for read-only viewing.
+</Note>
+
+---
+
+## Healthchecks.io
+
+**Purpose:** Cron job and backup script heartbeat monitoring
+
+**Platform:** Cloud-hosted at healthchecks.io (free tier)
+
+**Alternative:** Self-hosted instance (future consideration)
+
+### Monitored Jobs
+
+| Job Name | Frequency | Script | Monitored Action |
+|----------|-----------|--------|------------------|
+| Docker Backup | Daily (2 AM) | `/opt/scripts/backup-docker.sh` | Successful rsync to NAS |
+| Plex DB Backup | Daily (3 AM) | `/opt/scripts/backup-plex-db.sh` | Successful Plex DB backup |
+| PBS Backup (docker-prod-01) | Daily (1 AM) | Proxmox Backup Server | VM snapshot completion |
+| PBS Backup (auth-prod-01) | Weekly (Sun 1 AM) | Proxmox Backup Server | VM snapshot completion |
+| PBS Backup (immich-prod-01) | Weekly (Sun 2 AM) | Proxmox Backup Server | VM snapshot completion |
+| Synology ABB Pull | Daily (4 AM) | Synology Active Backup | Successful backup pull |
+
+### Integration
+
+**Ping URL format:**
+```
+https://hc-ping.com/<uuid>
+```
+
+**Bash script integration:**
+```bash
+#!/bin/bash
+# backup-docker.sh with Healthchecks integration
+
+HC_URL="https://hc-ping.com/<uuid>"
+
+# Backup logic here
+if rsync -a /opt/appdata /mnt/nas/backups/; then
+  curl -fsS --retry 3 $HC_URL > /dev/null
+else
+  curl -fsS --retry 3 $HC_URL/fail > /dev/null
+fi
+```
+
+**Ping types:**
+- `$HC_URL` - Success ping (job completed successfully)
+- `$HC_URL/start` - Start ping (job started)
+- `$HC_URL/fail` - Failure ping (job failed)
+
+### Alert Configuration
+
+**Grace period:**
+- Daily jobs: 15 minutes grace period
+- Weekly jobs: 60 minutes grace period
+- Allows for slight delays without false alarms
+
+**Notification channels:**
+- Discord webhook (primary)
+- Email (secondary)
+- SMS (critical jobs only, requires paid plan)
+
+**Alert triggers:**
+- Job did not ping within expected schedule + grace period
+- Job sent explicit failure ping
+- Job started but never completed
+
+### Dashboard
+
+**Access:** https://healthchecks.io/checks/
+
+**Features:**
+- Visual timeline of pings
+- Last ping time and status
+- Expected next ping time
+- Historical reliability percentage
+- Manual ping test button
+
+---
+
+## Monitoring Strategy
+
+### Complementary Roles
+
+**Beszel:** Infrastructure-level metrics
+- "Is the host healthy?"
+- "Is CPU/RAM/disk usage normal?"
+- "Are containers running?"
+
+**Uptime Kuma:** Application-level availability
+- "Is the service responding?"
+- "Is HTTPS working with valid certificate?"
+- "Can users access the service?"
+
+**Healthchecks.io:** Job execution verification
+- "Did the backup run?"
+- "Did the backup succeed?"
+- "Are cron jobs executing on schedule?"
+
+### Alert Fatigue Prevention
+
+**Thresholds:**
+- Beszel: Alert only on sustained high usage (>90% for 5+ minutes)
+- Uptime Kuma: 3 retry attempts before alerting
+- Healthchecks: Grace period prevents early alerts
+
+**Channel routing:**
+- Critical alerts: Discord with @mention
+- Non-critical alerts: Discord without mention
+- Informational: Log only, no notification
+
+---
+
+## Backup Monitoring Deep Dive
+
+### Docker Backup Script
+
+**Script:** `/opt/scripts/backup-docker.sh`
+
+**Coverage:**
+- `/opt/stacks/` - All compose files
+- `/opt/appdata/` - All container persistent data
+
+**Safety features:**
+- Mountpoint check: Fails if NAS mount missing (prevents backup to local disk)
+- Lockfile: Prevents concurrent runs
+- Healthchecks ping on success/failure
+- Logs to `/var/log/backup-docker.log`
+
+**Cron schedule:**
+```bash
+0 2 * * * /opt/scripts/backup-docker.sh
+```
+
+**Healthchecks integration:**
+- Success ping: Backup completed without errors
+- Failure ping: rsync error, mountpoint missing, or lockfile conflict
+
+### Plex DB Backup Script
+
+**Script:** `/opt/scripts/backup-plex-db.sh`
+
+**Process:**
+1. Stop Plex service
+2. rsync `/opt/appdata/plex/` to NAS `/backups/plex/db/`
+3. Restart Plex service
+4. Ping Healthchecks on success/failure
+
+**EXIT trap:**
+```bash
+trap 'systemctl start plex' EXIT
+```
+Ensures Plex restarts even if script fails mid-backup.
+
+**Cron schedule:**
+```bash
+0 3 * * * /opt/scripts/backup-plex-db.sh
+```
+
+### PBS Backup Monitoring
+
+**Proxmox Backup Server:**
+- Automated VM snapshots configured per host
+- Backup jobs run via Proxmox scheduler
+- Healthchecks ping via post-job hook script
+
+**Hook script:**
+```bash
+#!/bin/bash
+# /usr/local/bin/pbs-healthcheck.sh
+
+if [ "$1" = "backup-end" ] && [ "$2" = "0" ]; then
+  curl -fsS --retry 3 https://hc-ping.com/<uuid>
+else
+  curl -fsS --retry 3 https://hc-ping.com/<uuid>/fail
+fi
+```
+
+---
+
+## Future: Kubernetes Monitoring
+
+When Phase 6 k3s cluster is introduced:
+
+**Prometheus + Grafana:**
+- Replaces Beszel for k8s metrics
+- Pod, node, and persistent volume monitoring
+- Custom dashboards for application metrics
+
+**Lens or Headlamp:**
+- Kubernetes cluster management UI
+- Real-time resource viewing
+- Log aggregation
+
+**Uptime Kuma and Healthchecks:**
+- Continue for application-level and job monitoring
+- Kubernetes-native health checks supplement but don't replace
+
+<Note>
+Docker-based services (ARR stack, qBittorrent) will remain on Beszel monitoring even after k3s introduction.
+</Note>
+
+---
+
+<Accordion title="Troubleshooting Monitoring">
+
+**Beszel agent not reporting:**
+1. Check agent status on host: `systemctl status beszel-agent` (native) or `docker logs beszel-agent` (Docker)
+2. Verify network connectivity to Beszel server: `curl http://192.168.10.20:45876`
+3. Check agent key matches server configuration
+4. Review firewall rules: Agent port 45876 must be accessible
+
+**Uptime Kuma false positives:**
+1. Increase retry count: Settings → Monitor → Retries (try 5)
+2. Increase timeout: Settings → Monitor → Timeout (try 30 seconds)
+3. Check certificate expiration alerts are set correctly
+4. Verify keyword search is not too strict
+
+**Healthchecks not receiving pings:**
+1. Test ping manually: `curl -fsS https://hc-ping.com/<uuid>`
+2. Check cron job is running: `systemctl status cron`
+3. Review cron logs: `grep CRON /var/log/syslog`
+4. Verify script has internet access: Test with `curl https://google.com`
+5. Check script exit code: Add `echo $?` at end of script
+
+**Backup script not running:**
+1. Check cron syntax: `crontab -l`
+2. Verify script executable: `chmod +x /opt/scripts/backup-docker.sh`
+3. Check mountpoint before run: `mount | grep /mnt/nas`
+4. Review script logs: `tail -f /var/log/backup-docker.log`
+5. Test manual run: `/opt/scripts/backup-docker.sh`
+
+</Accordion>

@@ -1,0 +1,279 @@
+---
+title: "Phase 4 — Service Migration"
+description: "Migrate all services from v2 to v3 in waves with gradual DNS cutover"
+icon: "arrows-turn-to-dots"
+---
+
+<Info>
+**Status:** Planned
+
+**Category:** Application Layer
+</Info>
+
+## Objective
+
+Migrate all services from v2 docker-host to v3 docker-host. **Run v2 and v3 in parallel** until v3 is validated, then cut over DNS and decommission v2.
+
+## Entry Criteria
+
+<Check>
+  Phase 3 complete — docker-prod-01 VM running with NFS mounts verified
+</Check>
+
+## Migration Strategy
+
+<Info>
+**Parallel Operation**
+
+v2 services stay untouched while v3 is built. Services run in parallel until v3 is validated. DNS rewrites flip from v2 IPs to v3 IPs per-service. **No big-bang cutover.**
+</Info>
+
+Migrate in **waves**. Infra first, then media stack, then books stack. Each wave is validated before the next begins.
+
+## Migration Waves
+
+<Tabs>
+  <Tab title="Wave 1 — Infrastructure">
+    ### Wave 1 — Infrastructure Stack
+
+    <Steps>
+      <Step title="Deploy Traefik">
+        - Deploy Traefik with Cloudflare DNS-01 wildcard cert (`*.giohosted.com`)
+        - Verify Traefik is serving HTTPS internally before migrating any other service
+      </Step>
+      
+      <Step title="Deploy Authentik">
+        - Deploy Authentik on auth-prod-01 VM (restore from backup)
+        - Verify OIDC integrations working
+      </Step>
+      
+      <Step title="Deploy Infrastructure Services">
+        - Deploy cloudflared (CF Tunnel) — keep pointed at v2 until all services migrated
+        - Deploy adguardhome-sync
+        - Create dns-prod-02 LXC on pve-prod-02 — verify adguardhome-sync propagating correctly
+        - Deploy Dockman
+        - Deploy Homarr (restore config from backup)
+        - Deploy Beszel + agents on all hosts
+      </Step>
+      
+      <Step title="Update DNS Rewrites">
+        Update AdGuard DNS rewrite: `*.giohosted.com` → Traefik IP (192.168.30.11, not NPM)
+      </Step>
+      
+      <Step title="Validate">
+        Validate: internal HTTPS access to all infra services via Traefik
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Wave 2 — Media Stack">
+    ### Wave 2 — Media Stack (ARR)
+
+    <Steps>
+      <Step title="Plex">
+        - Plex is already running on Unraid (configured in Phase 2)
+        - Restore database from backup
+        - Verify library, update paths to match /data structure
+        - Verify QuickSync hardware transcoding is working: Plex → Settings → Transcoder
+        - Configure Plex port forward on UDM-SE: 32400 → Unraid host IP
+        - Verify remote access working for external users
+      </Step>
+      
+      <Step title="Deploy Sonarr Instances">
+        - Deploy **Sonarr (TV)** — restore config, verify `/data/media/tv` and `/data/downloads/tv` paths
+        - Deploy **Sonarr (Anime)** — fresh config with anime-specific quality profiles (TRaSH Guides), `/data/media/anime` and `/data/downloads/anime` paths
+      </Step>
+      
+      <Step title="Deploy Radarr Instances">
+        - Deploy **Radarr (1080p)** — restore config, verify `/data/media/movies/1080p` and `/data/downloads/movies` paths
+        - Deploy **Radarr (4K)** — fresh config with 4K WebDL quality profile, `/data/media/movies/4k` path
+        - **Migrate existing 4K movies into Radarr (4K)** — use Radarr's Movie Editor to bulk-select existing 4K titles, assign correct root folder, trigger library rescan. Do not re-download — existing files just need re-pathing.
+      </Step>
+      
+      <Step title="Deploy ARR Support Services">
+        - Deploy Prowlarr — restore config, sync indexers to all four ARR instances
+        - Deploy Bazarr, Profilarr, Maintainerr, Seerr, Tautulli — restore configs
+      </Step>
+      
+      <Step title="Validate Hardlinks">
+        Verify hardlinks working: `stat` a file in /data/media — confirm inode matches file in /data/downloads
+      </Step>
+      
+      <Step title="Test End-to-End">
+        Test end-to-end: request → grab → import → Plex for each category (TV, Anime, 1080p, 4K)
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Wave 3 — Torrent Stack">
+    ### Wave 3 — Torrent Stack
+
+    <Steps>
+      <Step title="Deploy Torrent Stack">
+        Deploy torrent-stack: Gluetun + qBittorrent + qBitrr
+      </Step>
+      
+      <Step title="Verify VPN Killswitch">
+        Verify VPN killswitch — confirm public IP is ProtonVPN Chicago
+      </Step>
+      
+      <Step title="Verify Port Forwarding">
+        Verify automatic port forwarding — MAM shows Fully Connectable
+      </Step>
+      
+      <Step title="Configure qBitrr">
+        - Configure qBitrr — connect all four ARR instances (Sonarr-TV, Sonarr-Anime, Radarr-1080p, Radarr-4K)
+        - Configure qBitrr MAM seeding rules — 14 day minimum seed time on ebooks and audiobooks categories
+        - Verify qBitrr web UI accessible and showing all ARR instances correctly
+      </Step>
+      
+      <Step title="Repoint ARR Instances">
+        Repoint Sonarr and Radarr instances to new qBit endpoint
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Wave 4 — Books Stack">
+    ### Wave 4 — Books Stack
+
+    <Steps>
+      <Step title="Deploy Books Services">
+        Deploy Audiobookshelf, Calibre-Web-Automated, Shelfmark
+      </Step>
+      
+      <Step title="Restore Configs">
+        Restore configs from v2 backups
+      </Step>
+      
+      <Step title="Verify NFS Paths">
+        Verify NFS paths: /books/ebooks/library, /books/audiobooks/library, etc.
+      </Step>
+      
+      <Step title="Verify OIDC">
+        Verify OIDC for Audiobookshelf
+      </Step>
+      
+      <Step title="Test Hardlink Workflow">
+        Test audiobook hardlink workflow end-to-end
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Wave 5 — Photos Stack">
+    ### Wave 5 — Photos Stack (immich-prod-01)
+
+    <Steps>
+      <Step title="Deploy Immich">
+        Deploy Immich stack on immich-prod-01 VM: server, ml worker, redis, postgresql
+      </Step>
+      
+      <Step title="Mount NFS">
+        Mount NFS `/data/photos` → immich-prod-01 from nas-prod-01
+      </Step>
+      
+      <Step title="Restore Library">
+        Restore Immich library — photo data already migrated in Phase 2
+      </Step>
+      
+      <Step title="Verify ML Worker">
+        Verify face detection and CLIP indexing working (ML worker)
+      </Step>
+      
+      <Step title="Configure OIDC">
+        Configure Authentik OIDC for Immich
+      </Step>
+      
+      <Step title="Verify External Access">
+        Verify Immich accessible via Cloudflare Tunnel
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Cutover
+
+<Steps>
+  <Step title="Update Cloudflare Tunnel">
+    Update Cloudflare Tunnel to point at v3 services:
+    - docker-prod-01 for media stack
+    - auth-prod-01 for Authentik
+    - immich-prod-01 for Immich
+  </Step>
+  
+  <Step title="Update Plex Port Forward">
+    Update Plex port forward to point at nas-prod-01
+  </Step>
+  
+  <Step title="Verify External Access">
+    Verify all externally exposed services working
+  </Step>
+  
+  <Step title="Monitor">
+    Monitor for 48 hours
+  </Step>
+  
+  <Step title="Decommission v2">
+    Decommission v2 Proxmox host — power down, keep for 2 weeks before wiping
+  </Step>
+</Steps>
+
+## Service Inventory
+
+| Service | Stack | v3 Status | Notes |
+|---------|-------|-----------|-------|
+| Traefik | infra | New (replaces NPM) | Reverse proxy + wildcard TLS |
+| Authentik | infra | Carry forward | IdP — OIDC for all SSO apps. Runs on auth-prod-01 VM. |
+| cloudflared | infra | Carry forward | CF Tunnel — ABS, Shelfmark, Seerr, Authentik |
+| AdGuard Home (LXC) | lxc | Carry forward | Primary DNS + ad-blocking |
+| adguardhome-sync | infra | Carry forward | Syncs dns-prod-01 to dns-prod-02 |
+| Homarr | infra | Carry forward | Operations dashboard |
+| Beszel | monitoring | Carry forward | Host/VM metrics. Agents on all hosts. |
+| Plex | unraid-docker | Move to Unraid native Docker | QuickSync via i5-13400 iGPU |
+| Sonarr (TV) | arr | Carry forward | TV show automation |
+| Sonarr (Anime) | arr | New instance | Anime automation — separate instance |
+| Radarr (1080p) | arr | Carry forward | 1080p WebDL automation |
+| Radarr (4K) | arr | New instance | 4K WebDL automation |
+| Prowlarr | arr | Carry forward | Indexer management |
+| Bazarr | arr | Carry forward | Subtitle automation |
+| qBittorrent | torrent | Carry forward | Must stay containerized with Gluetun killswitch |
+| Gluetun | torrent | Carry forward | ProtonVPN WireGuard killswitch |
+| qBitrr | torrent | New (replaces qbit-automation) | Manages all 4 ARR instances. Web UI for management. |
+| Immich | photos | Move to immich-prod-01 VM | Dedicated VM — isolated for ML worker resource tuning |
+| Audiobookshelf | books | Carry forward | Audiobook server with OIDC |
+| Calibre-Web-Automated | books | Carry forward | Ebook library manager |
+| Shelfmark | books | Carry forward | Ebook/audiobook request frontend |
+| Dockman | infra | Carry forward | Docker compose management |
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="All services running on v3 infrastructure" icon="check">
+    - All Wave 1-5 services deployed and accessible
+    - No services remaining on v2 docker-host
+  </Accordion>
+  
+  <Accordion title="External access working via CF Tunnel" icon="cloud">
+    - Audiobookshelf accessible externally
+    - Shelfmark accessible externally
+    - Seerr accessible externally
+    - Authentik accessible externally
+    - Immich accessible externally
+  </Accordion>
+  
+  <Accordion title="PBS backing up all VMs nightly" icon="database">
+    - Backup jobs configured for all VMs
+    - Test restore successful
+  </Accordion>
+  
+  <Accordion title="Backup scripts running with Healthchecks heartbeats" icon="heart-pulse">
+    - backup-docker.sh running nightly
+    - backup-plex-db.sh running nightly
+    - Healthchecks.io showing all heartbeats green
+  </Accordion>
+</AccordionGroup>
+
+## Next Phase
+
+<Card title="Phase 5 — Operational Hardening" icon="shield-check" href="/phases/phase-5-hardening">
+  Validate backups, monitoring, and tighten security
+</Card>

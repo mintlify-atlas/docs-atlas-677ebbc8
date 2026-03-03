@@ -1,0 +1,161 @@
+---
+title: Welcome to Homelab v3
+description: A clean-slate rebuild of a production homelab infrastructure with institutional knowledge from v2, designed for reliability, scalability, and future growth
+---
+
+## Your homelab, reimagined
+
+Homelab v3 is a deliberate, clean-slate rebuild of a production-grade home infrastructure. Where v2 evolved organically over time, v3 is designed intentionally—every decision documented, every component purposeful, and every layer built with future goals in mind.
+
+This documentation captures the complete architecture, design decisions, and operational runbooks for a homelab running:
+
+- **Proxmox VE** for virtualization across two nodes
+- **Unraid** as a dedicated NAS with ZFS and parity protection  
+- **Docker** for containerized services (media automation, books, photos, authentication)
+- **Traefik** for reverse proxy with automatic HTTPS
+- **AdGuard Home** for DNS and ad-blocking
+- **Proxmox Backup Server** for VM snapshots and recovery
+
+This isn't a tutorial—it's a living technical reference for a real homelab in production use.
+
+<Note>
+  **Current status:** Planning phase. This documentation will be updated as each phase of the build completes.
+</Note>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card
+    title="Design philosophy"
+    icon="compass-drafting"
+    href="/design-philosophy"
+  >
+    Understand the core principles and architectural decisions behind v3
+  </Card>
+  <Card
+    title="Hardware architecture"
+    icon="server"
+    href="/architecture/hardware"
+  >
+    Explore the physical infrastructure, from compute nodes to storage arrays
+  </Card>
+  <Card
+    title="Network design"
+    icon="network-wired"
+    href="/architecture/network"
+  >
+    Learn about VLAN segmentation, firewall rules, and DNS architecture
+  </Card>
+  <Card
+    title="Storage architecture"
+    icon="hard-drive"
+    href="/architecture/storage"
+  >
+    Dive into Unraid pools, NFS exports, and the /data mount structure
+  </Card>
+</CardGroup>
+
+## What makes v3 different
+
+<CardGroup cols={2}>
+  <Card title="Bare-metal NAS separation" icon="database">
+    Dedicated Unraid host replaces TrueNAS-as-a-VM for better performance and reliability
+  </Card>
+  <Card title="Proxmox OS redundancy" icon="clone">
+    Mirrored NVMe boot drives eliminate single-point-of-failure risks from v2
+  </Card>
+  <Card title="Proper VLAN segmentation" icon="shield-halved">
+    Four VLANs with explicit firewall rules instead of partial segmentation
+  </Card>
+  <Card title="UPS protection" icon="bolt">
+    NUT-based graceful shutdown protects against data corruption on power loss
+  </Card>
+  <Card title="Kubernetes-ready architecture" icon="dharmachakra">
+    Network, storage, and compute designed to support future k3s migration
+  </Card>
+  <Card title="GitOps-friendly design" icon="code-branch">
+    All configuration in version control with clear separation of secrets
+  </Card>
+</CardGroup>
+
+## Key technologies
+
+<AccordionGroup>
+  <Accordion title="Compute & virtualization">
+    - **Proxmox VE 8.x** — Two-node cluster with QDevice for split-brain prevention
+    - **Minisforum MS-A2** with Ryzen 9 7945HX (primary compute node)
+    - **Dell Optiplex 3070 Micro** with i5-9th gen (secondary compute node)
+    - **Raspberry Pi 4B** for lightweight monitoring and cluster quorum
+  </Accordion>
+
+  <Accordion title="Storage & NAS">
+    - **Unraid 7.2.3** with hybrid ZFS + parity array
+    - **5x WD Red Pro 12TB** (dual parity + 3 data drives)
+    - **2x WD Red Plus 4TB** in ZFS mirror for critical data
+    - **10GbE SFP+ DAC** for dedicated storage traffic
+  </Accordion>
+
+  <Accordion title="Networking">
+    - **UniFi Dream Machine SE** (router/firewall)
+    - **UniFi managed switch** with 2.5GbE and VLAN trunking
+    - **Four VLANs:** Management (10), Trusted (20), Services (30), IoT (40)
+    - **AdGuard Home** for split-horizon DNS and ad-blocking
+  </Accordion>
+
+  <Accordion title="Services & applications">
+    - **Traefik** reverse proxy with wildcard TLS certificates
+    - **Authentik** for SSO and identity management
+    - **Sonarr, Radarr, Prowlarr** for media automation (ARR stack)
+    - **Plex** on Unraid with Intel QuickSync transcoding
+    - **Immich** for photo management with ML-powered search
+    - **Audiobookshelf, Calibre-Web-Automated** for ebook/audiobook libraries
+  </Accordion>
+</AccordionGroup>
+
+## Built for production
+
+This homelab runs real workloads for real users. It's not a lab in the experimental sense—it's production infrastructure that happens to run at home.
+
+<Warning>
+  Every design decision prioritizes **reliability** and **recoverability** over experimentation. New technologies are introduced in isolated sandbox environments first.
+</Warning>
+
+You'll find:
+
+- **Multi-tier backup strategy** with Proxmox Backup Server, rsync scripts, ZFS snapshots, and off-box replication
+- **Graceful UPS shutdown** via NUT to prevent data corruption
+- **Hardlink-preserving workflows** for torrent seeding and media management
+- **Monitoring and alerting** with Beszel, Uptime Kuma, and Healthchecks.io
+- **Zero-downtime migrations** via parallel DNS cutover
+
+## Documentation structure
+
+This documentation is organized by infrastructure layer:
+
+- **Overview** — Architecture overview and design philosophy (you are here)
+- **Hardware** — Physical hosts, rack layout, power, and UPS
+- **Network** — VLANs, firewall rules, DNS, and remote access
+- **Storage** — Unraid pools, share layout, NFS exports, and UID/GID strategy
+- **Compute** — Proxmox clustering, VM layout, and resource allocation
+- **Services** — Docker stacks, service inventory, and application architecture
+- **Operations** — Backup procedures, monitoring, and runbooks
+- **Build phases** — Sequential build roadmap from Phase 0 (procurement) to Phase 6 (Kubernetes)
+
+<Tip>
+  Use the search bar to quickly find specific services, configurations, or decision rationale.
+</Tip>
+
+## Who is this for?
+
+This documentation serves multiple audiences:
+
+- **You** (the operator) — as a comprehensive reference during troubleshooting, upgrades, and expansions
+- **Future you** — when you need to remember why a decision was made six months ago
+- **Contributors** — if you ever expand the team or hand off components
+- **The community** — as a reference architecture for production homelabs
+
+If you're looking for a beginner's guide to homelabbing, this isn't it. If you're looking for a well-documented, production-grade homelab architecture with clear decision rationale, read on.
+
+---
+
+**Version:** 7.0 | **Author:** Gio | **Status:** Planning phase

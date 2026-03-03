@@ -1,0 +1,388 @@
+---
+title: Photo Services
+description: Immich photo server with ML-powered organization and facial recognition
+---
+
+## Overview
+
+Immich provides self-hosted photo and video management with machine learning capabilities for facial recognition, object detection, and smart search.
+
+<Card title="Immich" icon="camera" href="https://immich.app">
+  High-performance photo server with ML-powered organization
+</Card>
+
+**Location:** immich-prod-01 (192.168.30.14) - Dedicated VM
+
+**Stack:** `/opt/stacks/photos/compose.yaml`
+
+---
+
+## Why Dedicated VM?
+
+Immich runs on isolated VM for resource management:
+
+**Reasons for isolation:**
+- **ML worker causes CPU spikes** during face detection and CLIP indexing
+- **Independent resource tuning** without affecting media stack
+- **RAM allocation** can be capped independently (4-6GB)
+- **Future HA candidate** when Kubernetes is introduced
+
+---
+
+## Immich Architecture
+
+### Stack Components
+
+```yaml
+services:
+  immich-server:      # Main application and API
+    - Web interface
+    - Mobile app API
+    - Photo/video serving
+    
+  immich-machine-learning:  # ML workloads
+    - Facial recognition
+    - Object detection (CLIP)
+    - Smart search indexing
+    
+  postgresql:         # Database
+    - Photo metadata
+    - User data
+    - ML embeddings
+    
+  redis:             # Cache and job queue
+    - Task coordination
+    - Session management
+```
+
+### Resource Requirements
+
+**VM allocation:**
+- RAM: 4-6GB (expandable based on library size)
+- CPU: 2-4 vCPU
+- Storage: Local VM disk for PostgreSQL and Redis
+- Photos: NFS mount to NAS ZFS mirror pool
+
+**ML worker impact:**
+- CPU spikes during initial indexing (new photos)
+- Background processing during idle time
+- Face detection runs on upload
+- CLIP indexing for smart search
+
+---
+
+## Storage Configuration
+
+### Photo Library Location
+
+**Path:** `/data/photos/` (NFS mount)
+
+**NAS backend:** ZFS mirror pool on nas-prod-01
+- 2x 4TB WD Red Plus in ZFS mirror (~4TB usable)
+- **Irreplaceable data** - ZFS provides data integrity guarantees
+- ZFS snapshots enabled for point-in-time recovery
+- Included in Tier 3 off-box backup to Synology
+
+<Warning>
+Photos are stored on ZFS mirror pool (not parity array) due to irreplaceable nature. ZFS protects against silent data corruption.
+</Warning>
+
+### Directory Structure
+
+**Immich-managed:**
+```
+/data/photos/
+├── library/          # Uploaded photos organized by Immich
+│   ├── user-id/
+│   │   └── 2024/
+│   │       └── 2024-03-15/
+│   │           └── IMG_1234.jpg
+├── thumbs/          # Generated thumbnails
+├── encoded-video/   # Transcoded videos
+└── profile/         # User avatars
+```
+
+**Database and config:**
+- PostgreSQL: `/opt/appdata/immich/postgres/` (VM local disk)
+- Redis: `/opt/appdata/immich/redis/` (VM local disk)
+- Immich config: `/opt/appdata/immich/config/` (VM local disk)
+
+---
+
+## Features
+
+### Mobile Upload
+
+**Automatic backup:**
+- iOS app: Background upload support
+- Android app: Background upload support
+- Configurable upload conditions (WiFi only, charging, etc.)
+- Original quality preservation
+
+**App installation:**
+- iOS: Immich from App Store
+- Android: Immich from Google Play or F-Droid
+
+**Configuration:**
+1. Install mobile app
+2. Enter server URL: `https://immich.giohosted.com` (internal) or via external URL
+3. Authenticate with Authentik OIDC
+4. Enable automatic backup
+5. Select albums/folders to sync
+
+### Facial Recognition
+
+**ML-powered:**
+- Automatic face detection on upload
+- Face grouping by similarity
+- Manual naming and merging of face clusters
+- Search by person name
+
+**Privacy:**
+- All ML processing runs locally (no cloud API calls)
+- Face embeddings stored in PostgreSQL
+- No third-party services involved
+
+### Smart Search
+
+**CLIP-based:**
+- Natural language search ("dog on beach", "sunset in mountains")
+- Object and scene detection
+- Color-based search
+- Location-based search (if EXIF GPS data present)
+
+**Examples:**
+```
+"red car"
+"person wearing blue shirt"
+"food on table"
+"sunset"
+"mountain landscape"
+```
+
+### Albums and Sharing
+
+**Organization:**
+- User-created albums
+- Shared albums with other users
+- Public sharing links (optional)
+- Favorites and archives
+
+**Collaboration:**
+- Multi-user support
+- Per-user libraries
+- Shared album contributions
+
+---
+
+## Access Configuration
+
+### Internal Access
+
+**URL:** `https://immich.giohosted.com`
+
+**Resolution:**
+- AdGuard DNS rewrite: `immich.giohosted.com → 192.168.30.14`
+- Direct connection to immich-prod-01 VM (bypasses Traefik)
+- Alternative: Route via Traefik at 192.168.30.11
+
+### External Access
+
+**Method:** Cloudflare Tunnel (optional - configure if needed)
+
+**Protection:**
+- Authentik OIDC authentication
+- Cloudflare Access policies
+- Restricted to authorized users
+
+<Note>
+External access to Immich can be enabled via Cloudflare Tunnel if needed for mobile uploads away from home. WireGuard VPN is alternative for secure remote access.
+</Note>
+
+### SSO Integration
+
+**OIDC via Authentik:**
+
+**Configuration:**
+1. Create OIDC provider in Authentik for Immich
+2. Configure Immich OAuth settings:
+   - Issuer URL: `https://auth.giohosted.com/application/o/immich/`
+   - Client ID: (from Authentik)
+   - Client Secret: (from Authentik)
+3. Enable auto-register for new users
+4. Map email and name claims
+
+**User experience:**
+- Click "Login with OAuth" on Immich login page
+- Redirect to Authentik for authentication
+- Auto-create Immich account on first login
+- Subsequent logins seamless
+
+---
+
+## Machine Learning Configuration
+
+### Models
+
+Immich downloads ML models on first start:
+
+**Face detection:**
+- Model: `buffalo_l` (default)
+- Accuracy: High
+- Speed: Moderate
+
+**CLIP (smart search):**
+- Model: `ViT-B-32::openai` (default)
+- Supports natural language queries
+
+**Model storage:**
+- Location: `/opt/appdata/immich/model-cache/`
+- Size: ~2-3GB total
+- Downloaded automatically on first ML job
+
+### Processing Jobs
+
+**Automatic jobs:**
+- Face detection on upload
+- CLIP embedding generation
+- Thumbnail creation
+- Video transcoding (if enabled)
+
+**Manual jobs:**
+- Settings → Jobs → Run face detection for all
+- Settings → Jobs → Run smart search for all
+- Used after enabling new features or updating models
+
+**Job queue:**
+- Managed by Redis
+- Background processing
+- Configurable concurrency
+
+---
+
+## Backup Strategy
+
+### Tier 1: Docker Appdata
+
+**Backed up nightly:**
+- `/opt/appdata/immich/` on immich-prod-01
+- Includes PostgreSQL database, Redis data, config
+- Destination: NAS `/backups/immich/` (ZFS mirror pool)
+- Method: Hardened rsync script with Healthchecks ping
+
+### Tier 0: VM Snapshot
+
+**Proxmox Backup Server:**
+- Weekly snapshot of immich-prod-01 VM
+- Includes VM disk with all appdata
+- Retention: 4 weekly snapshots
+- Destination: pbs-prod-01 → NAS ZFS pool
+
+### Tier 2: Photo Library
+
+**ZFS snapshots:**
+- `/data/photos/` on NAS ZFS mirror pool
+- Automatic snapshots: Hourly, daily, weekly
+- Retention: 24 hourly, 7 daily, 4 weekly
+- Point-in-time recovery for accidental deletions
+
+### Tier 3: Off-Box Cold Copy
+
+**Synology Active Backup for Business:**
+- Nightly pull from nas-prod-01 `/data/photos/` to Synology NAS
+- Read-only credentials (pull-based security)
+- Retention: 30 days
+
+### Tier 4: Cloud Backup (Future)
+
+**Backblaze B2:**
+- Planned for irreplaceable photo data
+- Encrypted client-side before upload
+- Long-term offsite protection
+
+---
+
+## Maintenance
+
+### Updates
+
+**Docker image updates:**
+```bash
+cd /opt/stacks/photos
+docker compose pull
+docker compose up -d
+```
+
+**Database maintenance:**
+- PostgreSQL auto-vacuum enabled
+- Manual vacuum: Immich Settings → Jobs → Database cleanup
+
+### Storage Management
+
+**Disk usage monitoring:**
+- Check VM disk usage: Cockpit on immich-prod-01
+- Check photo library size: Immich Settings → Storage
+- Monitor ZFS pool: Unraid dashboard
+
+**Cleanup options:**
+- Remove transcoded videos: Settings → Video transcoding → Disable
+- Delete thumbnails and regenerate: Settings → Jobs → Regenerate thumbnails
+- Archive old photos: Use archive feature (hides from timeline)
+
+---
+
+## Migration to Kubernetes (Future)
+
+Immich is a **high-priority candidate** for k3s migration in Phase 6:
+
+**Benefits:**
+- High availability across worker nodes
+- Operator-managed upgrades
+- Declarative configuration
+- Resource limits and requests
+
+**Considerations:**
+- PostgreSQL as StatefulSet
+- Persistent volume for photo library (Longhorn or NFS CSI)
+- ML worker as separate Deployment
+- Ingress via Traefik (already familiar)
+
+<Note>
+Migration will not occur until Phase 6 sandbox cluster is proven stable. Current VM deployment is production-ready and will continue until k3s is validated.
+</Note>
+
+---
+
+<Accordion title="Troubleshooting Immich">
+
+**ML jobs not running:**
+1. Check immich-machine-learning container status: `docker ps`
+2. Review ML worker logs: `docker logs immich-machine-learning`
+3. Verify model files downloaded: Check `/opt/appdata/immich/model-cache/`
+4. Manually trigger job: Settings → Jobs → Run face detection
+
+**Uploads failing:**
+1. Check disk space on VM: `df -h`
+2. Verify NFS mount healthy: `mount | grep /data/photos`
+3. Check file permissions: Should be `2000:2000`
+4. Review immich-server logs for errors
+
+**OIDC login not working:**
+1. Verify Authentik provider configured correctly
+2. Check redirect URI matches: `https://immich.giohosted.com/auth/login`
+3. Review Authentik logs for authorization errors
+4. Ensure email and name claims mapped in Authentik scope
+
+**Face detection inaccurate:**
+1. Try different face detection model: Settings → Machine Learning
+2. Adjust face detection threshold
+3. Manually merge face clusters
+4. Re-run face detection job after model change
+
+**High CPU usage:**
+1. Check ML jobs running: Settings → Jobs
+2. Reduce ML concurrency: Settings → Machine Learning → Concurrency
+3. Schedule ML jobs during off-peak hours
+4. Consider increasing VM CPU allocation
+
+</Accordion>

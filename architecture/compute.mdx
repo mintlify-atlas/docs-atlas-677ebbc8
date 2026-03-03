@@ -1,0 +1,344 @@
+---
+title: Compute & Virtualization
+description: Proxmox cluster configuration, VM/LXC layout, and resource allocation
+---
+
+## Proxmox Cluster
+
+**Cluster Name**: pve-cluster-prod
+
+**Nodes**: Two-node cluster with QDevice on Raspberry Pi
+- `pve-prod-01` (MS-A2) — Primary compute
+- `pve-prod-02` (Optiplex 3070 Micro) — Secondary compute
+- `pi-prod-01` (Raspberry Pi 4B) — QDevice tiebreaker
+
+**Purpose**: Unified management only — one web UI to manage both nodes, all VMs and LXCs visible from one place.
+
+<Warning>
+**HA (High Availability) is NOT enabled**. pve-prod-02 cannot handle pve-prod-01's workload. HA without matched hardware is false security.
+</Warning>
+
+### Cluster vs. HA Clarification
+
+**Clustering** = One unified management UI for both nodes. All VMs visible from one interface.
+
+**HA** = Automatic VM migration on node failure. Requires matched hardware and 3+ node quorum to be meaningful.
+
+**Our Configuration**: Clustering enabled for convenience. HA disabled because:
+- Optiplex cannot absorb MS-A2's workload (CPU, RAM mismatch)
+- HA creates illusion of resilience without delivering it
+- If pve-prod-01 goes down, services on it are down until it comes back up — acceptable for homelab
+
+### QDevice Role
+
+**Purpose**: Lightweight tiebreaker to prevent split-brain in 2-node cluster.
+
+**Deployment**: Proxmox QDevice on pi-prod-01 (192.168.10.20)
+
+**Why QDevice?**: A 2-node cluster without a quorum device can suffer split-brain — both nodes think they're primary and fence each other. QDevice on the Pi costs nothing (10-minute setup) and prevents this.
+
+---
+
+## VM & LXC Layout — pve-prod-01 (MS-A2, Primary)
+
+**Host Specs**: Ryzen 9 7945HX (16C/32T), 32GB DDR5
+
+| Guest | Type | RAM | vCPU | Storage | Notes |
+|-------|------|-----|------|---------|-------|
+| docker-prod-01 | VM (Ubuntu 24.04) | 16–20GB | 4–6 | 100GB | All media/app containers. ARR stack, books, torrent, infra. |
+| auth-prod-01 | VM (Debian) | 2GB | 2 | 20GB | Authentik IdP. Dedicated VM (LXC rejected due to stability issues). |
+| immich-prod-01 | VM (Ubuntu 24.04) | 4–6GB | 4 | 50GB | Immich photo server + ML worker. Isolated for resource tuning. |
+| dns-prod-01 | LXC (Debian) | 512MB | 1 | 8GB | Primary AdGuard Home. |
+| [future] k3s-ctrl-lab-01 | VM | 4GB | 2 | 30GB | k3s control plane — Phase 6 lab only |
+| [future] k3s-work-lab-01 | VM | 8GB | 4 | 50GB | k3s worker — Phase 6 lab only |
+
+**Total Allocation** (current): ~23GB RAM, ~10 vCPU, ~178GB storage
+
+**Headroom**: 9GB RAM, 6 vCPU cores available for k3s lab VMs in Phase 6
+
+---
+
+## VM & LXC Layout — pve-prod-02 (Optiplex, Secondary)
+
+**Host Specs**: i5-9500T (6C/6T), 16GB DDR4
+
+| Guest | Type | RAM | vCPU | Storage | Notes |
+|-------|------|-----|------|---------|-------|
+| pbs-prod-01 | VM (Debian) | 4GB | 2 | 50GB | Proxmox Backup Server. Backs up all VMs on both nodes. |
+| dns-prod-02 | LXC (Debian) | 512MB | 1 | 8GB | Secondary AdGuard Home. Synced from dns-prod-01 via adguardhome-sync. |
+| [future] k3s-work-lab-02 | VM | 8GB | 4 | 50GB | k3s worker — Phase 6 lab only |
+
+**Total Allocation** (current): ~4.5GB RAM, ~3 vCPU, ~58GB storage
+
+**Headroom**: 11.5GB RAM, 3 vCPU cores available
+
+---
+
+## Guest Details
+
+### docker-prod-01 — Media Stack VM
+
+**Purpose**: Runs all media automation and application containers.
+
+**Workload**:
+- **Media Automation**: Sonarr (TV + Anime), Radarr (1080p + 4K), Prowlarr, Bazarr, Maintainerr, Seerr, Tautulli
+- **Torrents**: qBittorrent, Gluetun (VPN killswitch), qBitrr (manages all 4 ARR instances)
+- **Books**: Audiobookshelf, Calibre-Web-Automated, Shelfmark
+- **Infrastructure**: Traefik (reverse proxy), cloudflared (CF Tunnel), Dockman (compose management), Homarr (dashboard), Flaresolverr
+
+**Storage**:
+- NFS mount from nas-prod-01: `/mnt/user` → `/data` on VM
+- Local disk: `/opt/appdata` for container configs (not on NFS — databases stay local)
+
+**Network**: 192.168.30.11 (Services VLAN 30)
+
+**Management**: Cockpit installed for web-based day-to-day management (disk usage, logs, updates, file browser)
+
+<Note>
+All containers share the VM's IP (192.168.30.11). Traefik routes by hostname. Individual container IPs are NOT assigned.
+</Note>
+
+---
+
+### auth-prod-01 — Authentik IdP VM
+
+**Purpose**: Authentik identity provider. OIDC/OAuth2 SSO for all services.
+
+**Why Dedicated VM?**
+- LXC deployment officially removed from Proxmox community scripts (May 2025)
+- LXC had frequent breakage and 14GB RAM requirement during build
+- VM is the only stable deployment option
+- Dedicated VM isolates the IdP from other workloads (appropriate for critical auth service)
+
+**SSO-Enabled Services**:
+- Proxmox (both nodes)
+- Audiobookshelf, Calibre-Web-Automated, Immich, Homarr, Beszel
+- Synology DSM (local admin retained as break-glass)
+- Cloudflare Access policies
+
+**Network**: 192.168.30.13 (Services VLAN 30)
+
+**External Access**: Exposed via Cloudflare Tunnel at `auth.giohosted.com` (NOT behind Cloudflare Access)
+
+---
+
+### immich-prod-01 — Photo Management VM
+
+**Purpose**: Immich photo server with ML worker for face detection and CLIP indexing.
+
+**Why Dedicated VM?**
+- ML worker causes significant CPU spikes during indexing
+- Isolated VM allows resource caps (CPU limits, RAM limits) without affecting media stack
+- Independent scaling and tuning
+
+**Workload**:
+- Immich server (web UI, API)
+- Immich ML worker (face detection, CLIP embeddings)
+- Redis (caching)
+- PostgreSQL (metadata)
+
+**Storage**:
+- NFS mount from nas-prod-01: `/mnt/user/photos` → `/data/photos` on VM (ZFS mirror pool)
+- Local disk: PostgreSQL database, Redis data
+
+**Network**: 192.168.30.14 (Services VLAN 30)
+
+**External Access**: Exposed via Cloudflare Tunnel at `immich.giohosted.com` with Authentik OIDC
+
+---
+
+### dns-prod-01 & dns-prod-02 — AdGuard Home LXCs
+
+**Purpose**: DNS resolution with ad-blocking and split-horizon DNS rewrites.
+
+**Architecture**:
+- **dns-prod-01** (LXC on pve-prod-01, 192.168.30.10): Primary instance, receives all client queries
+- **dns-prod-02** (LXC on pve-prod-02, 192.168.30.15): Secondary instance, synced via adguardhome-sync
+
+**Why Two Instances?**
+- DNS survives either Proxmox node going down
+- UDM-SE DHCP configured with both as DNS servers (primary .10, secondary .15)
+
+**Configuration**:
+- DNS rewrites: `*.giohosted.com` → 192.168.30.11 (Traefik on docker-prod-01)
+- Upstream resolvers: Cloudflare DNS (1.1.1.1), Google DNS (8.8.8.8)
+- Ad-blocking: Standard blocklists
+
+<Note>
+Secondary AdGuard moved off the Pi compared to v2 — now runs as LXC on pve-prod-02. Pi is dedicated to QDevice + monitoring only.
+</Note>
+
+---
+
+### pbs-prod-01 — Proxmox Backup Server VM
+
+**Purpose**: VM-level backups for all VMs on both Proxmox nodes.
+
+**Backup Target**: NAS ZFS mirror pool (`/mnt/user/backups` via NFS)
+
+**Schedule**:
+- Daily backups of all production VMs (docker-prod-01, auth-prod-01, immich-prod-01)
+- Weekly backups of infrastructure VMs (pbs-prod-01 itself, dns LXCs)
+- Retention: 7 daily, 4 weekly, 3 monthly
+
+**Network**: 192.168.30.12 (Services VLAN 30)
+
+<Warning>
+PBS backs up VM disk images — it does NOT back up application data inside VMs. Docker appdata, Plex DB, and other application-level data require separate backup strategies.
+</Warning>
+
+**Why on pve-prod-02?**
+
+Running PBS on a different node than the primary workloads provides isolation. A backup server on the same node it's backing up is a single point of failure.
+
+---
+
+## Proxmox Boot Redundancy
+
+### pve-prod-01 (MS-A2)
+
+**Configuration**: 2x NVMe drives in ZFS RAID-1 mirror (configured in Proxmox installer)
+
+**Drives**:
+- Samsung 980 NVMe 1TB (S/N: S64ANS0W120169T)
+- Sabrent Rocket NVMe 1TB
+
+**Why Mirrored Boot?**
+
+Single NVMe boot was the primary fragility in v2. One drive failure killed the entire hypervisor. Mirrored boot means a single drive can fail and Proxmox keeps running.
+
+### pve-prod-02 (Optiplex)
+
+**Configuration**: Single 256GB NVMe
+
+**Why Not Mirrored?**
+
+Single NVMe is acceptable given this node's non-critical secondary role (PBS VM + one AdGuard LXC). If pve-prod-02 goes down, production services on pve-prod-01 are unaffected.
+
+---
+
+## Hardware Transcoding
+
+### Plex on Unraid (i5-13400 QuickSync)
+
+**Platform**: Plex runs on nas-prod-01 as an Unraid Docker container (NOT on docker-prod-01)
+
+**Transcoding**: Intel UHD 730 iGPU via QuickSync
+
+**Why on Unraid?**
+- QuickSync on 12th/13th gen Intel is mature and well-supported by Plex
+- Handles 2x simultaneous 1080p transcodes without breaking a sweat
+- No NFS hop — media files are local to the host doing transcoding
+- No iGPU passthrough complexity
+
+### MS-A2 Radeon 680M (Available, Not Used)
+
+**Status**: Available for future use but not configured at launch
+
+**Potential Uses**:
+- ML inference workloads
+- Additional transcoding if QuickSync capacity exceeded
+- GPU-accelerated compute tasks
+
+<Note>
+QuickSync is the better transcoding choice for Plex. Radeon 680M kept as future expansion option.
+</Note>
+
+---
+
+## Service Isolation Strategy
+
+### Why Multiple VMs?
+
+**Authentik (auth-prod-01)**: IdP is critical infrastructure. LXC deployment unstable. Dedicated VM provides isolation and stability.
+
+**Immich (immich-prod-01)**: ML worker causes CPU spikes. Dedicated VM allows resource caps without affecting media stack.
+
+**Media Stack (docker-prod-01)**: Consolidates all media/app containers on one VM. Simpler than multi-VM Docker arrangement. Will migrate selectively to k3s in Phase 6.
+
+### Why Not More VMs?
+
+Multi-VM Docker arrangements solve HA poorly and add operational complexity. All these containers will eventually migrate to k3s anyway — over-investing in a multi-VM Docker architecture that gets torn down in Phase 6 is wasteful.
+
+---
+
+## Future: Kubernetes (Phase 6)
+
+v3 hardware and resource allocation intentionally leaves headroom for future k3s deployment.
+
+### Planned k3s Architecture (Sandbox First)
+
+**Control Plane**: `k3s-ctrl-lab-01` (VM on pve-prod-01, 4GB RAM, 2 vCPU)
+
+**Workers**:
+- `k3s-work-lab-01` (VM on pve-prod-01, 8GB RAM, 4 vCPU)
+- `k3s-work-lab-02` (VM on pve-prod-02, 8GB RAM, 4 vCPU)
+
+**Storage**: Longhorn for PVCs inside the cluster
+
+**Ingress**: Traefik ingress controller (familiar from Docker context)
+
+**GitOps**: Flux or ArgoCD
+
+<Note>
+**Sandbox First**: k3s introduced as an isolated learning cluster. No production services migrate until the cluster is proven stable. Sandbox runs in parallel with zero impact on running services.
+</Note>
+
+### Production Migration Candidates (Post-Sandbox Only)
+
+**Good Fits for k8s**:
+- Immich — benefits from HA and operator-managed upgrades
+- Authentik — IdP should be highly available
+- Beszel / Uptime Kuma — monitoring infrastructure
+- Traefik — already the ingress controller in k3s
+
+**Intentionally Staying in Docker**:
+- ARR stack (Sonarr, Radarr, Prowlarr, Bazarr) — hardlinks and atomic moves make k8s messy
+- qBittorrent + Gluetun — VPN killswitch model doesn't translate cleanly to k8s networking
+- Books stack (CWA, ABS, Shelfmark) — ingest/hardlink workflows are filesystem-dependent
+
+<Warning>
+Do not rush Phase 6. A broken k3s cluster on top of an unstable foundation helps nobody. Phase 5 must be fully stable — reliable backups, clean monitoring, solid documentation — before starting k3s sandbox.
+</Warning>
+
+---
+
+## Cluster Management
+
+### Access
+
+**Proxmox Web UI**: Accessible from both node IPs
+- pve-prod-01: https://192.168.10.11:8006
+- pve-prod-02: https://192.168.10.12:8006
+
+**Clustering**: Both nodes visible from either UI. Switch nodes via dropdown in top-right.
+
+**Authentication**: OIDC via Authentik (configured for both nodes)
+
+### Resource Monitoring
+
+**Proxmox Native**:
+- CPU, RAM, storage usage per node
+- VM/LXC resource consumption
+- Network traffic graphs
+
+**External Monitoring**:
+- Beszel: Host/VM metrics, uptime tracking
+- Uptime Kuma: Service uptime monitoring (HTTP checks)
+- Healthchecks.io: Backup job heartbeat monitoring
+
+---
+
+## Key Compute Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|--------|
+| Cluster approach | Cluster without HA + QDevice | Clustering = unified UI. HA rejected — Optiplex can't absorb MS-A2 workload. |
+| Authentik deployment | Dedicated VM (not LXC) | LXC officially removed from scripts (May 2025) due to instability. VM is stable. |
+| Immich deployment | Dedicated VM (not shared) | ML worker CPU spikes. Isolated VM allows resource caps without affecting media stack. |
+| Docker VM count | Single docker-prod-01 VM | Multi-VM Docker solves HA poorly and gets torn down when k3s arrives. |
+| k3s approach | Sandbox first, then selective production | No prod migration until cluster proven stable. Sandbox has zero production impact. |
+| Proxmox boot (MS-A2) | ZFS RAID-1 mirror | Single NVMe was v2's fragility. Mirror survives single drive failure. |
+| Proxmox boot (Optiplex) | Single NVMe | Acceptable for non-critical secondary role. |
+
+See [Architecture Decisions](/architecture/decisions) for full decision log with context.

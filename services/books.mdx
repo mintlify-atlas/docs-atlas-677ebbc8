@@ -1,0 +1,362 @@
+---
+title: Book Services
+description: Ebook and audiobook library management with automated workflows
+---
+
+## Overview
+
+The book stack provides automated ebook and audiobook management with library organization, metadata management, and user request interfaces.
+
+<CardGroup cols={3}>
+  <Card title="Audiobookshelf" icon="headphones">
+    Audiobook server and player
+  </Card>
+  <Card title="Calibre-Web-Automated" icon="book">
+    Ebook library with metadata automation
+  </Card>
+  <Card title="Shelfmark" icon="bookmark">
+    Book request interface
+  </Card>
+</CardGroup>
+
+**Location:** docker-prod-01 (192.168.30.11)
+
+**Stack:** `/opt/stacks/books/compose.yaml`
+
+---
+
+## Audiobookshelf
+
+**Purpose:** Audiobook server and streaming player
+
+**Access:**
+- Internal: `https://audiobooks.giohosted.com`
+- External: `https://audiobooks.giohosted.com` (via Cloudflare Tunnel)
+
+### Features
+
+- Web and mobile apps (iOS/Android)
+- Progress tracking across devices
+- Playback speed control and sleep timer
+- Podcast support
+- User management with individual libraries
+- Chapter navigation
+- OIDC authentication via Authentik
+
+### Library Configuration
+
+**Library path:** `/data/media/books/audiobooks/`
+
+**Folder structure:**
+```
+/data/media/books/audiobooks/
+├── Author Name/
+│   └── Book Title/
+│       ├── cover.jpg
+│       └── Book Title.m4b
+└── Another Author/
+    └── Another Book/
+        ├── cover.jpg
+        └── Chapter 01.mp3
+        └── Chapter 02.mp3
+```
+
+**Supported formats:**
+- M4B (preferred - single file with chapters)
+- MP3
+- M4A
+- FLAC
+- OGG
+
+### SSO Configuration
+
+**Authentication:** OIDC via Authentik
+
+**Known issue:** Sub (subject) unlink fix required
+- Audiobookshelf may create duplicate users if sub claim changes
+- Documented fix available in Authentik configuration
+
+### External Access
+
+**Protection:**
+- Cloudflare Access with Authentik OIDC
+- Access restricted to `users` and `admins` groups
+- Valid authentication required for streaming
+
+**Mobile apps:**
+- iOS: Audiobookshelf app
+- Android: Audiobookshelf app
+- Configure server URL: `https://audiobooks.giohosted.com`
+
+---
+
+## Calibre-Web-Automated (CWA)
+
+**Purpose:** Ebook library management with automated metadata fetching and format conversion
+
+**Access:** `https://calibre.giohosted.com`
+
+### Features
+
+- Web-based ebook reader
+- Metadata management via Calibre backend
+- Automatic metadata fetching from multiple sources
+- Format conversion (EPUB, MOBI, AZW3, PDF)
+- User libraries with individual bookshelves
+- Send to Kindle integration
+- OAuth2 authentication via Authentik
+
+### Library Configuration
+
+**Calibre library path:** `/data/media/books/ebooks/`
+
+**This is the canonical source of truth for all ebooks.** When ebooks are imported, they are:
+1. Organized by author and title
+2. Metadata fetched and applied
+3. Stored in Calibre database structure
+
+**Folder structure (Calibre managed):**
+```
+/data/media/books/ebooks/
+├── Author Name/
+│   └── Book Title (ID)/
+│       ├── cover.jpg
+│       ├── metadata.opf
+│       └── Book Title.epub
+└── metadata.db  # Calibre database
+```
+
+### Automated Workflow
+
+**Ingest process:**
+1. Shelfmark hardlinks downloaded ebook to `/data/downloads/books/ebooks/ingest/`
+2. CWA detects new file in ingest directory
+3. Fetches metadata from configured sources
+4. Imports to Calibre library at `/data/media/books/ebooks/`
+5. **Deletes hardlink** from ingest directory
+6. Original file in `/data/downloads/books/ebooks/downloads/` continues seeding
+
+<Note>
+Hardlink workflow ensures seeding continues after CWA import. v2 had a bug where CWA deleted the original file, breaking torrent seeding.
+</Note>
+
+### SSO Configuration
+
+**Authentication:** OAuth2 via Authentik
+
+**User linking:** Manual per user
+- Users must link their Authentik account on first login
+- Admin can pre-create accounts and users link during SSO
+
+---
+
+## Shelfmark
+
+**Purpose:** Book request interface for ebooks and audiobooks
+
+**Access:**
+- Internal: `https://books.giohosted.com`
+- External: `https://books.giohosted.com` (via Cloudflare Tunnel)
+
+### Features
+
+- Search interface for ebooks and audiobooks
+- User requests sent to configured sources
+- Status tracking for requests
+- Integration with private trackers (MAM)
+- Automatic download via qBittorrent
+- Hardlink creation for library import
+
+### Integration
+
+**Connected services:**
+- qBittorrent (via Gluetun VPN)
+- Calibre-Web-Automated (ebook import)
+- Audiobookshelf (audiobook import)
+
+**Download workflow (ebooks):**
+1. User requests ebook via Shelfmark
+2. Shelfmark searches indexers (e.g., MAM)
+3. Best match sent to qBittorrent
+4. qBittorrent downloads to `/data/downloads/books/ebooks/downloads/`
+5. **Shelfmark creates hardlink** to `/data/downloads/books/ebooks/ingest/`
+6. CWA imports from ingest directory
+7. CWA deletes hardlink after import
+8. Original file continues seeding in downloads directory
+
+**Download workflow (audiobooks):**
+1. User requests audiobook via Shelfmark  
+2. Shelfmark searches indexers
+3. Download sent to qBittorrent
+4. qBittorrent downloads to `/data/downloads/books/audiobooks/downloads/`
+5. **Shelfmark creates hardlink** to `/data/media/books/audiobooks/`
+6. Audiobookshelf scans and adds to library
+7. Original file continues seeding in downloads directory
+
+### External Access
+
+**Protection:**
+- Cloudflare Access with Authentik OIDC
+- Access restricted to authorized users
+- Request submissions logged and tracked
+
+---
+
+## Storage Architecture
+
+### Directory Structure
+
+**On docker-prod-01 (`/data` = NFS mount to nas-prod-01):**
+
+```
+/data/
+├── media/books/
+│   ├── ebooks/              # CWA Calibre library (canonical)
+│   │   ├── Author/Book/
+│   │   └── metadata.db
+│   └── audiobooks/          # Audiobookshelf library
+│       └── Author/Book/
+└── downloads/books/
+    ├── ebooks/
+    │   ├── downloads/       # qBit seeds from here (permanent)
+    │   └── ingest/          # CWA imports from here (temporary)
+    └── audiobooks/
+        └── downloads/       # qBit seeds from here (permanent)
+```
+
+### Hardlink Workflow Explained
+
+<Warning>
+This is the fix for v2's seeding breakage bug. Hardlinks allow CWA to "delete" imported files without affecting the seeding torrent.
+</Warning>
+
+**Ebook hardlink flow:**
+
+| Step | Actor | Action | File Locations |
+|------|-------|--------|----------------|
+| 1 | qBittorrent | Downloads ebook | `/data/downloads/books/ebooks/downloads/book.epub` |
+| 2 | Shelfmark | Creates hardlink | `downloads/book.epub` + `ingest/book.epub` (same inode) |
+| 3 | CWA | Imports file | Reads from `ingest/book.epub` |
+| 4 | CWA | Adds to library | Copies to `/data/media/books/ebooks/Author/Book/` |
+| 5 | CWA | Deletes ingest file | Removes `ingest/book.epub` hardlink |
+| 6 | qBittorrent | Continues seeding | `downloads/book.epub` still exists (untouched) |
+| 7 | qBitrr | Stops after 14 days | Enforces MAM 14-day minimum seed time |
+
+**Why this works:**
+- Hardlink = same file with two directory entries
+- Deleting one directory entry doesn't delete the file
+- File only deleted when **all** hardlinks removed
+- qBit sees original download path unchanged
+
+**Verification:**
+```bash
+# Check hardlink status
+stat /data/downloads/books/ebooks/downloads/book.epub
+stat /data/downloads/books/ebooks/ingest/book.epub
+# Matching inode = hardlinked
+# Different inode = copied (WRONG - breaks seeding)
+```
+
+---
+
+## MAM Seeding Requirements
+
+**Private tracker:** MyAnonamouse (MAM)
+
+**Minimum seed time:** 14 days for ebooks and audiobooks
+
+**Enforcement:** qBitrr configured with category-specific rules
+
+```yaml
+seeding:
+  categories:
+    books-ebooks: 14d
+    books-audiobooks: 14d
+```
+
+**After 14 days:**
+- qBitrr automatically stops seeding
+- Torrent removed from qBittorrent
+- File remains in downloads directory (manual cleanup or automated script)
+
+---
+
+## SSO and External Access
+
+### Audiobookshelf
+
+**OIDC via Authentik:**
+- Users authenticate with Authentik credentials
+- Accounts automatically created on first login
+- Access controlled via Cloudflare Access policies
+
+**Mobile app configuration:**
+1. Open Audiobookshelf app
+2. Enter server URL: `https://audiobooks.giohosted.com`
+3. Tap "Login with SSO"
+4. Authenticate via Authentik
+5. Mobile app receives session token
+
+### Calibre-Web-Automated
+
+**OAuth2 via Authentik:**
+- Manual user linking required
+- Admin creates user accounts in CWA
+- Users link Authentik account on first OAuth login
+
+### Shelfmark
+
+**Cloudflare Access:**
+- Protected via Cloudflare Access policies
+- Authentik OIDC for user authentication
+- Access restricted to `users` and `admins` groups
+
+---
+
+## Backup Strategy
+
+**Docker appdata:**
+- `/opt/appdata/audiobookshelf/`
+- `/opt/appdata/calibre-web-automated/`
+- `/opt/appdata/shelfmark/`
+- Backed up nightly to NAS `/backups` via rsync script
+
+**Library data:**
+- Calibre library: `/data/media/books/ebooks/` (on NAS parity array)
+- Audiobook library: `/data/media/books/audiobooks/` (on NAS parity array)
+- Protected by Unraid dual parity
+- Included in nightly Synology ABB cold copy
+
+<Accordion title="Troubleshooting Book Stack">
+
+**CWA not importing from ingest:**
+1. Check ingest directory permissions: Should be `2000:2000`
+2. Verify CWA ingest path configured: `/data/downloads/books/ebooks/ingest/`
+3. Check CWA logs for import errors
+4. Manually trigger library scan in CWA settings
+
+**Hardlinks not working:**
+1. Verify downloads and ingest are on same filesystem: `df -h`
+2. Both must be on Unraid parity array (not cache)
+3. Test manually: `ln /data/downloads/books/ebooks/downloads/test.epub /data/downloads/books/ebooks/ingest/test.epub`
+4. Check inode: `stat` both files - should match
+
+**Shelfmark not creating hardlinks:**
+1. Check Shelfmark configuration for hardlink support
+2. Verify paths are correct in Shelfmark settings
+3. Review Shelfmark logs for errors
+4. Ensure file permissions allow hardlink creation
+
+**Seeding stops after import:**
+1. This indicates CWA deleted the original file, not the hardlink
+2. Verify Shelfmark created hardlink (not copy): Check with `stat`
+3. Confirm CWA ingest path points to ingest directory, not downloads
+4. Check qBittorrent for "missing files" errors
+
+**MAM ratio not improving:**
+1. Verify qBittorrent is "Fully Connectable" (check port forwarding)
+2. Confirm VPN not blocking incoming connections
+3. Check qBitrr not stopping seeds too early (14 day minimum)
+4. Review MAM freeleech events for bonus upload
+
+</Accordion>

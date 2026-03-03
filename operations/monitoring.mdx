@@ -1,0 +1,491 @@
+---
+title: Monitoring & Alerts
+description: Setting up monitoring, alert configuration, and observability stack
+---
+
+## Monitoring Stack Overview
+
+Homelab v3 uses a lightweight, distributed monitoring approach:
+
+- **Beszel**: Host and container metrics (CPU, RAM, disk, network)
+- **Uptime Kuma**: Service availability and uptime tracking
+- **Healthchecks.io**: Backup job heartbeat monitoring
+- **Proxmox Built-in**: Hypervisor and VM resource metrics
+- **Unraid Built-in**: Array health, disk temperatures, SMART data
+
+---
+
+## Beszel - Host & Container Metrics
+
+**Architecture**: Hub (server) runs on `pi-prod-01`, agents run on all hosts and VMs.
+
+**Dashboard**: `https://beszel.giohosted.com` (internal)
+
+### Installing Beszel Server (Hub)
+
+Beszel hub runs on Raspberry Pi to ensure monitoring survives Proxmox node failures.
+
+<Steps>
+  <Step title="Deploy Beszel Hub">
+    SSH to `pi-prod-01`:
+    
+    ```bash
+    mkdir -p /opt/beszel
+    cd /opt/beszel
+    
+    cat > docker-compose.yaml <<EOF
+    version: '3'
+    services:
+      beszel:
+        image: henrygd/beszel:latest
+        container_name: beszel-hub
+        restart: unless-stopped
+        ports:
+          - '8090:8090'
+        volumes:
+          - ./data:/beszel_data
+        environment:
+          - TZ=America/Chicago
+    EOF
+    
+    docker compose up -d
+    ```
+  </Step>
+
+  <Step title="Initial Setup">
+    Navigate to `http://192.168.10.20:8090`
+    
+    - Create admin account
+    - Set organization name
+    - Configure alert channels (optional)
+  </Step>
+
+  <Step title="Configure Traefik (Optional)">
+    Add DNS rewrite in AdGuard:
+    
+    `beszel.giohosted.com` → `192.168.10.20:8090`
+  </Step>
+</Steps>
+
+### Installing Beszel Agent
+
+Agents must be installed on:
+- `nas-prod-01` (Unraid)
+- `pve-prod-01` (Proxmox host)
+- `pve-prod-02` (Proxmox host)
+- `docker-prod-01` (VM)
+- `auth-prod-01` (VM)
+- `immich-prod-01` (VM)
+- `pbs-prod-01` (VM)
+
+<Steps>
+  <Step title="Generate Agent Key">
+    From Beszel hub UI:
+    
+    **Systems → Add System**
+    
+    - Name: `hostname` (e.g., `docker-prod-01`)
+    - Copy the generated agent key
+  </Step>
+
+  <Step title="Install Agent (Debian/Ubuntu)">
+    SSH to target host:
+    
+    ```bash
+    curl -sL https://raw.githubusercontent.com/henrygd/beszel/main/supplemental/scripts/install-agent.sh -o install-agent.sh
+    chmod +x install-agent.sh
+    sudo ./install-agent.sh
+    ```
+    
+    When prompted:
+    - Port: `45876` (default)
+    - Hub URL: `http://192.168.10.20:8090`
+    - Agent Key: (paste from hub)
+  </Step>
+
+  <Step title="Install Agent (Unraid)">
+    From Unraid Community Apps:
+    
+    - Search "Beszel Agent"
+    - Install and configure:
+      - Port: `45876`
+      - Agent Key: (from hub)
+  </Step>
+
+  <Step title="Verify Connection">
+    Return to Beszel hub UI → Systems
+    
+    Host should appear with green status and live metrics.
+  </Step>
+</Steps>
+
+### Configuring Beszel Alerts
+
+<Steps>
+  <Step title="Add Alert Channel">
+    Beszel Hub → **Settings → Alerts → Add Channel**
+    
+    Options:
+    - Discord webhook (recommended)
+    - Email
+    - Custom webhook
+  </Step>
+
+  <Step title="Create Alert Rules">
+    **Systems → [Select Host] → Alerts → Add Alert**
+    
+    Example rules:
+    
+    **High CPU Alert**:
+    - Metric: `CPU Usage`
+    - Condition: `> 80%`
+    - Duration: `5 minutes`
+    - Channel: Discord
+    
+    **Disk Space Alert**:
+    - Metric: `Disk Usage`
+    - Condition: `> 85%`
+    - Duration: `1 minute`
+    - Channel: Discord
+    
+    **Memory Pressure**:
+    - Metric: `Memory Usage`
+    - Condition: `> 90%`
+    - Duration: `10 minutes`
+    - Channel: Discord
+  </Step>
+
+  <Step title="Test Alerts">
+    Trigger a test alert to verify channel configuration:
+    
+    **Alerts → [Select Alert] → Test**
+  </Step>
+</Steps>
+
+<Warning>
+**OIDC Requirement**: Beszel requires a custom Authentik scope with `email_verified: true` to function correctly. See Identity & Access documentation for configuration details.
+</Warning>
+
+---
+
+## Uptime Kuma - Service Availability
+
+**Location**: `pi-prod-01` (survives Proxmox failures)
+
+**Dashboard**: `https://uptime.giohosted.com` (internal only)
+
+### Deploying Uptime Kuma
+
+<Steps>
+  <Step title="Deploy Container">
+    SSH to `pi-prod-01`:
+    
+    ```bash
+    mkdir -p /opt/uptime-kuma
+    cd /opt/uptime-kuma
+    
+    cat > docker-compose.yaml <<EOF
+    version: '3'
+    services:
+      uptime-kuma:
+        image: louislam/uptime-kuma:latest
+        container_name: uptime-kuma
+        restart: unless-stopped
+        ports:
+          - '3001:3001'
+        volumes:
+          - ./data:/app/data
+    EOF
+    
+    docker compose up -d
+    ```
+  </Step>
+
+  <Step title="Initial Setup">
+    Navigate to `http://192.168.10.20:3001`
+    
+    - Create admin account
+    - Configure notification methods (Discord, email, etc.)
+  </Step>
+</Steps>
+
+### Adding Service Monitors
+
+<Steps>
+  <Step title="Add HTTP Monitor">
+    **Add New Monitor**
+    
+    Example - Traefik:
+    - Monitor Type: `HTTP(s)`
+    - Friendly Name: `Traefik Dashboard`
+    - URL: `https://traefik.giohosted.com`
+    - Heartbeat Interval: `60 seconds`
+    - Retries: `3`
+    - Expected Status Code: `200`
+  </Step>
+
+  <Step title="Add Ping Monitor">
+    Example - Proxmox Node:
+    - Monitor Type: `Ping`
+    - Friendly Name: `pve-prod-01`
+    - Hostname: `192.168.10.11`
+    - Heartbeat Interval: `60 seconds`
+  </Step>
+
+  <Step title="Add DNS Monitor">
+    Example - AdGuard:
+    - Monitor Type: `DNS`
+    - Friendly Name: `AdGuard DNS (Primary)`
+    - Hostname: `giohosted.com`
+    - DNS Server: `192.168.30.10`
+    - Expected Result: Matches DNS rewrite IP
+  </Step>
+</Steps>
+
+### Recommended Monitors
+
+| Service | Type | URL/Host | Interval |
+|---------|------|----------|----------|
+| **Infrastructure** |
+| Traefik | HTTP | https://traefik.giohosted.com | 60s |
+| Authentik | HTTP | https://auth.giohosted.com | 60s |
+| AdGuard (dns-prod-01) | Ping | 192.168.30.10 | 60s |
+| AdGuard (dns-prod-02) | Ping | 192.168.30.15 | 60s |
+| PBS | HTTP | https://192.168.30.12:8007 | 300s |
+| **Media Services** |
+| Plex | HTTP | https://plex.giohosted.com | 120s |
+| Sonarr | HTTP | https://sonarr.giohosted.com | 120s |
+| Radarr | HTTP | https://radarr.giohosted.com | 120s |
+| Prowlarr | HTTP | https://prowlarr.giohosted.com | 120s |
+| qBittorrent | HTTP | https://qbit.giohosted.com | 120s |
+| **Books & Photos** |
+| Audiobookshelf | HTTP | https://audiobooks.giohosted.com | 120s |
+| Immich | HTTP | https://photos.giohosted.com | 120s |
+| **Proxmox** |
+| pve-prod-01 | Ping | 192.168.10.11 | 60s |
+| pve-prod-02 | Ping | 192.168.10.12 | 60s |
+| **NAS** |
+| nas-prod-01 | Ping | 192.168.10.10 | 60s |
+
+---
+
+## Healthchecks.io - Backup Job Monitoring
+
+**Platform**: SaaS (hosted)
+
+**Dashboard**: `https://healthchecks.io`
+
+### Creating New Healthcheck
+
+<Steps>
+  <Step title="Add Check">
+    Healthchecks.io → **Add Check**
+    
+    - Name: `backup-job-name`
+    - Tags: `backups`, `critical`
+    - Period: `1 day` (for daily jobs)
+    - Grace Time: `1 hour`
+  </Step>
+
+  <Step title="Configure Integrations">
+    **Integrations → Add Integration**
+    
+    - Type: Discord, Email, or Slack
+    - Configure webhook/email
+  </Step>
+
+  <Step title="Add Ping to Script">
+    Copy the unique ping URL and add to backup script:
+    
+    ```bash
+    #!/bin/bash
+    # Backup script
+    
+    # ... backup commands ...
+    
+    # On success, ping Healthchecks
+    if [ $? -eq 0 ]; then
+      curl -fsS --retry 3 https://hc-ping.com/YOUR-UNIQUE-UUID > /dev/null
+    fi
+    ```
+  </Step>
+</Steps>
+
+### Monitored Backup Jobs
+
+| Job | Schedule | Grace Period |
+|-----|----------|-------------|
+| docker-appdata-backup | Daily 04:00 | 1 hour |
+| plex-db-backup | Daily 03:00 | 1 hour |
+| pbs-backup-pve-prod-01 | Daily 01:00 | 2 hours |
+| pbs-backup-pve-prod-02 | Daily 01:30 | 2 hours |
+| synology-abb-pull | Nightly 02:00 | 3 hours |
+
+---
+
+## Proxmox Monitoring
+
+Proxmox VE includes built-in monitoring for nodes, VMs, and LXCs.
+
+### Viewing Metrics
+
+<Steps>
+  <Step title="Node-Level Metrics">
+    Proxmox UI → **[Select Node]** → **Summary**
+    
+    View:
+    - CPU usage (current + historical)
+    - Memory usage
+    - Disk I/O
+    - Network traffic
+  </Step>
+
+  <Step title="VM/LXC Metrics">
+    Proxmox UI → **[Select VM/LXC]** → **Summary**
+    
+    View real-time resource consumption for individual guests.
+  </Step>
+
+  <Step title="Storage Usage">
+    Proxmox UI → **Datacenter → Storage**
+    
+    Monitor:
+    - Local storage usage
+    - NFS mount health
+    - PBS datastore capacity
+  </Step>
+</Steps>
+
+### Configuring Email Alerts
+
+<Steps>
+  <Step title="Configure SMTP Relay">
+    Proxmox UI → **Datacenter → Notifications → SMTP**
+    
+    - SMTP Server: (your mail server)
+    - Port: `587` (TLS)
+    - Username/Password: (credentials)
+    - From Address: `proxmox@giohosted.com`
+  </Step>
+
+  <Step title="Create Notification Target">
+    **Notifications → Add**
+    
+    - Type: Email
+    - Recipient: Your email address
+    - Minimum Severity: `warning`
+  </Step>
+
+  <Step title="Test Notification">
+    **Notifications → [Select Target] → Test**
+  </Step>
+</Steps>
+
+---
+
+## Unraid Monitoring
+
+Unraid includes comprehensive monitoring for array health and disk status.
+
+### Dashboard Metrics
+
+Unraid Main Dashboard shows:
+- Array status (healthy, rebuilding, degraded)
+- Parity check status and history
+- Individual disk temperatures
+- Network throughput
+- Docker container status
+
+### Configuring Notifications
+
+<Steps>
+  <Step title="Enable Discord Notifications">
+    Unraid UI → **Settings → Notifications**
+    
+    - Discord Webhook URL: (from Discord server)
+    - Notification Types:
+      - Array errors (critical)
+      - Disk temperature warnings (> 50°C)
+      - Parity check completion
+      - Docker container crashes
+  </Step>
+
+  <Step title="Test Notification">
+    **Settings → Notifications → Test**
+  </Step>
+</Steps>
+
+### SMART Monitoring
+
+Unraid runs SMART tests automatically.
+
+<Steps>
+  <Step title="View SMART Data">
+    Unraid UI → **Main → [Select Disk] → SMART Info**
+    
+    Key metrics:
+    - Reallocated Sectors Count (should be 0)
+    - Current Pending Sector Count (should be 0)
+    - Power On Hours
+    - Temperature
+  </Step>
+
+  <Step title="Configure SMART Test Schedule">
+    **Settings → Disk Settings → SMART Testing**
+    
+    Recommended:
+    - Short test: Weekly
+    - Long test: Monthly
+  </Step>
+</Steps>
+
+---
+
+## Alert Escalation Policy
+
+### Severity Levels
+
+**Critical** (Immediate Action):
+- Proxmox node down
+- NAS array degraded
+- PBS backup failed 2+ consecutive days
+- Disk SMART failure
+
+**Warning** (Review Within 24h):
+- High CPU/RAM usage (> 80% sustained)
+- Disk space > 85%
+- Service downtime < 5 minutes
+- Backup job late but not failed
+
+**Info** (Review Weekly):
+- Routine maintenance notifications
+- Successful backup completions
+- Software updates available
+
+### Notification Channels by Severity
+
+| Severity | Discord | Email | SMS |
+|----------|---------|-------|-----|
+| Critical | ✓ | ✓ | (optional) |
+| Warning | ✓ | ✓ | |
+| Info | ✓ | | |
+
+---
+
+## Monitoring Checklist
+
+Daily:
+- [ ] Check Beszel dashboard for anomalies
+- [ ] Verify Uptime Kuma shows all services green
+- [ ] Confirm Healthchecks.io backup heartbeats
+
+Weekly:
+- [ ] Review Unraid array health and temps
+- [ ] Check Proxmox storage usage
+- [ ] Review Beszel historical trends
+
+Monthly:
+- [ ] Review PBS backup job logs
+- [ ] Check SMART data on all drives
+- [ ] Test restore from one backup tier
+- [ ] Update monitoring dashboards with new services

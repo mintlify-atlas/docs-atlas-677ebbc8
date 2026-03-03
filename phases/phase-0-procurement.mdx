@@ -1,0 +1,172 @@
+---
+title: "Phase 0 — Procurement & Physical Build"
+description: "Hardware acquisition, rack assembly, and physical layer validation"
+icon: "box"
+---
+
+<Info>
+**Status:** Procurement complete — physical build in progress
+
+**Started:** 2026-02-21
+</Info>
+
+## Objective
+
+Acquire all hardware, build the rack, and validate the physical layer before any software is installed. **UPS must be protecting the full stack before any drives are powered on.**
+
+## Entry Criteria
+
+None — this is the first phase.
+
+## Tasks
+
+<Steps>
+  <Step title="Purchase Core Hardware">
+    - UPS (APC 1500VA) — **FIRST purchase, before anything else**
+    - Minisforum MS-A2 (Ryzen 9 7945HX, 64GB DDR5)
+    - 2x NVMe for MS-A2 Proxmox boot mirror (1TB each)
+    - 10GbE SFP+ PCIe NIC for NAS host
+    - 2x DAC cables (MS-A2 ↔ NAS 10GbE direct link)
+  </Step>
+  
+  <Step title="Purchase Networking Equipment">
+    - UniFi switch (USW-Pro-Max-16 or USW-Flex-2.5G)
+    - UniFi patch panel (UP-PATCH-24 keystone)
+    - Keystone couplers (Cat6 shielded)
+    - Patch cables (Monoprice SlimRun Cat6 0.5ft)
+  </Step>
+  
+  <Step title="Purchase Rack and Chassis">
+    - Open-frame rack (15–18U, StarTech or NavePoint)
+    - 4U 12-bay chassis (IStarUSA D-400-12 or Rosewill RSV-L4412U)
+    - MS-A2 shelf mount (2U custom bracket)
+    - Optiplex shelf mount (1U)
+    - Brush panel for cable management
+  </Step>
+  
+  <Step title="Sell Excess Hardware">
+    - i5-13600 (use i5-13400 for NAS host)
+    - 2x 16GB DDR4 sticks (keep 32GB for NAS)
+    - MSI PRO B660M-A DDR4 (spare board with Realtek NIC issues)
+  </Step>
+  
+  <Step title="Upgrade Secondary Compute">
+    - Upgrade Optiplex 3070 Micro RAM to 32GB DDR4
+  </Step>
+  
+  <Step title="Assemble NAS">
+    - Install i5-13400, 32GB DDR4, LSI HBA, drives, 10GbE NIC
+    - Install in new 4U chassis
+    - Verify POST — no errors
+  </Step>
+  
+  <Step title="Mount Equipment in Rack">
+    - Position UPS at bottom of rack
+    - Mount UDM-SE, patch panel, switch, brush panel
+    - Mount MS-A2 shelf and Optiplex shelf
+    - Install NAS on rails
+    - Connect all devices to UPS battery-backed outlets
+  </Step>
+  
+  <Step title="Cable Management">
+    - 0.5M DAC: UDM-SE SFP+ → Switch SFP+
+    - 1M DAC: Switch SFP+ → MS-A2 SFP+
+    - 2M DAC: NAS X710 SFP+ → MS-A2 SFP+ (storage traffic, off LAN switch)
+    - RJ45: MS-A2 2.5GbE → Switch
+    - RJ45: NAS 2.5GbE → Switch
+    - RJ45: Optiplex 1GbE → Switch
+    - RJ45: Pi 1GbE → Switch
+    - Label all cables
+  </Step>
+</Steps>
+
+## Procurement Log
+
+### What Was Bought
+
+| Item | Model | Source | Price | Date |
+|------|-------|--------|-------|------|
+| Primary Compute | Minisforum MS-A2 (Ryzen 9 7945HX, 64GB DDR5) | Amazon | $559 + tax | 2026-02-21 |
+| NAS Chassis | Rosewill RSV-L4412U (4U, 12-bay) | Amazon | $345 | _(pending)_ |
+| NAS Motherboard | ASUS TUF Gaming Z690-Plus WiFi D4 | Reddit r/hardwareswap | ~$100 | _(pending)_ |
+| 10GbE NIC | Dell Intel X710-DA2 (dual-port SFP+) | eBay | ~$25 | _(pending)_ |
+| UPS | Tripp-Lite SMART1500LCDXL 1500VA | _(pending)_ | ~$145 | _(pending)_ |
+| Switch | UniFi USW-Pro-Max-24 | _(bundled with rack)_ | $560 | _(pending)_ |
+
+### What Was Already Owned
+
+| Item | Model | Notes |
+|------|-------|-------|
+| NAS CPU | Intel Core i5-13400 | Kept from existing tower — i5-13600 sold |
+| NAS RAM | 32GB DDR4 | Kept from existing tower — extra 2x 16GB sticks sold |
+| NAS HBA | LSI SAS 9120-8i | Migrated from previous host |
+| All HDD drives | WD Red Pro 12TB (x5), WD Red Plus 4TB (x5), IronWolf 6TB (x2) | Carried forward from v2 |
+| Secondary Compute | Dell Optiplex 3070 Micro | Free from work |
+| Router/Firewall | UniFi UDM-SE | Carried forward from v2 |
+
+### What Was Sold
+
+| Item | Reason | Estimated Return |
+|------|--------|------------------|
+| Intel Core i5-13600 | Unraid is IO-bound — i5-13400 is sufficient | ~$150 |
+| 2x 16GB DDR4 SO-DIMM | NAS only needs 32GB | ~$50 |
+| MSI PRO B660M-A DDR4 | Known Realtek NIC driver issues in Linux | ~$65 |
+
+## Key Decisions
+
+<Accordion title="PCIe Slot Problem — Gigabyte B760M DS3H DDR4">
+The original plan was to reuse the Gigabyte B760M DS3H DDR4 motherboard already in the tower. During planning it became clear the board only has **1x usable PCIe slot** — one x16 physical slot with two x1 slots that are too small for either the LSI HBA or the 10GbE NIC.
+
+The NAS needs both cards simultaneously, making this board incompatible. This was caught during planning before any hardware was purchased.
+
+A spare MSI PRO B660M-A DDR4 was considered but ruled out due to known Realtek NIC driver issues in Linux. The **ASUS TUF Gaming Z690-Plus WiFi D4** was sourced used from Reddit r/hardwareswap — it has a second x16 slot wired at x4 from the chipset which fits both the LSI HBA and the X710 NIC cleanly.
+</Accordion>
+
+<Accordion title="Scope Creep — Second Full Proxmox Node">
+During planning there was temptation to build a second full-spec Proxmox node using spare parts (i5-13600, spare mobo, extra 32GB RAM) instead of using the Optiplex as pve-prod-02.
+
+This was rejected. The Optiplex's workload is intentionally light (PBS + AdGuard LXC), HA is not enabled in this design, and a second powerful node would mean idle resources and higher power draw for no benefit. **The spare parts were sold instead.**
+</Accordion>
+
+<Accordion title="DAC Cable Lengths">
+Cable lengths were calculated based on the finalized rack layout:
+
+- **0.5M** — UDM-SE to switch. Both front-mounted, 2U apart, short run front-to-front.
+- **1M** — Switch to MS-A2. Front of switch to rear of MS-A2 shelf, routed through brush panel.
+- **2M** — NAS to MS-A2. Rear-to-rear run accounting for RSV-L4412U sliding rail extension slack (~1.5M actual path + margin). Storage traffic kept off the LAN switch — dedicated point-to-point link.
+</Accordion>
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="All hardware powered on and POST-verified" icon="check">
+    - MS-A2 boots cleanly
+    - NAS (Unraid USB flash) boots and shows all drives
+    - Optiplex boots cleanly
+    - Pi boots cleanly
+  </Accordion>
+  
+  <Accordion title="UPS protecting full stack" icon="plug">
+    - All devices connected to UPS battery-backed outlets
+    - UPS display shows all devices drawing power
+    - UPS USB cable connected to NAS (for NUT in Phase 2)
+  </Accordion>
+  
+  <Accordion title="Network cables labeled and connected" icon="ethernet">
+    - All DAC links showing 10GbE on switch
+    - All RJ45 links active
+    - Cables labeled at both ends
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+**UPS First**
+
+The UPS must be the **first purchase**. Do not power on the NAS with spinning rust drives until the UPS is in place and protecting the full stack. Power loss during a write on HDDs is a data corruption risk.
+</Warning>
+
+## Next Phase
+
+<Card title="Phase 1 — Network Foundation" icon="network-wired" href="/phases/phase-1-network">
+  VLANs, firewall rules, and network foundation
+</Card>

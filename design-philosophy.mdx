@@ -1,0 +1,324 @@
+---
+title: Design philosophy
+description: The core principles and architectural commitments that guide every decision in Homelab v3
+---
+
+## The v3 commitment
+
+Homelab v3 is a clean-slate rebuild with institutional knowledge from v2. Every decision is deliberate, documented, and built toward future goals (Kubernetes, GitOps, high availability).
+
+<Note>
+  Where v2 evolved organically, **v3 is designed intentionally**.
+</Note>
+
+This page documents the design principles that guide every architectural decision, along with the concrete commitments made to address v2's pain points.
+
+## Design principles
+
+The following table compares v2's state against v3's architectural commitments:
+
+| Principle | Applied in v2? | v3 commitment |
+|-----------|----------------|---------------|
+| **Bare-metal NAS separation** | No (TrueNAS as VM) | Dedicated NAS host |
+| **Proxmox OS redundancy** | No (single NVMe) | Mirrored NVMe boot |
+| **Proper VLAN segmentation with rules** | Partial (no FW rules) | Full inter-VLAN firewall |
+| **UPS protection** | No | Required before power-on |
+| **Kubernetes-ready architecture** | No | Designed for future k3s |
+
+Each principle represents a lesson learned from v2's operational challenges and a deliberate commitment to avoid repeating those mistakes.
+
+---
+
+## Principle 1: Bare-metal NAS separation
+
+<Warning>
+  **v2 pain point:** Running TrueNAS as a VM on Proxmox created a circular dependency—the hypervisor depended on storage provided by a VM running on that same hypervisor.
+</Warning>
+
+### The problem
+
+In v2, TrueNAS ran as a virtual machine on Proxmox. This created:
+
+- **Boot order fragility** — Proxmox needed TrueNAS for ISO storage, but TrueNAS needed Proxmox to run
+- **Performance overhead** — NFS traffic traversed the hypervisor's virtual networking stack unnecessarily
+- **Resource contention** — Storage I/O competed with compute workloads for CPU and RAM
+- **Recovery complexity** — Restoring the hypervisor required the storage VM to already be running
+
+### The v3 solution
+
+**Unraid runs on dedicated bare-metal hardware** (repurposed tower with i5-13400). The NAS is an independent infrastructure component, not a tenant of the compute layer.
+
+Benefits:
+
+- **No circular dependencies** — Proxmox and Unraid boot independently
+- **Direct hardware access** — LSI HBA passes drives directly to Unraid, no PCIe passthrough complexity
+- **Clear failure domains** — Compute failure doesn't impact storage; storage failure doesn't impact hypervisor
+- **Simplified recovery** — Each layer can be restored independently
+
+<Tip>
+  This architectural separation mirrors enterprise practice: storage and compute are separate infrastructure tiers.
+</Tip>
+
+---
+
+## Principle 2: Proxmox OS redundancy
+
+<Warning>
+  **v2 pain point:** Proxmox ran on a single NVMe drive. Drive failure meant complete hypervisor loss and multi-hour recovery from backups.
+</Warning>
+
+### The problem
+
+v2's Proxmox installation lived on a single NVMe. When that drive failed:
+
+- All VMs and LXCs became inaccessible instantly
+- Recovery required reinstalling Proxmox, restoring cluster config, and reimporting all VM disks
+- Downtime measured in hours, not minutes
+
+The hypervisor OS is a single point of failure for every service running on it.
+
+### The v3 solution
+
+**Proxmox installed on 2x NVMe in ZFS RAID-1 mirror** on the primary node (Minisforum MS-A2).
+
+Benefits:
+
+- **Transparent failover** — Single NVMe failure is invisible to running VMs
+- **Zero downtime** — Replace failed drive at your convenience, resilver completes in background
+- **No recovery needed** — The hypervisor never goes down
+
+<Note>
+  The secondary Proxmox node (Dell Optiplex) runs on a single NVMe. This is acceptable because it hosts non-critical workloads (Proxmox Backup Server, secondary DNS). The primary node requires redundancy.
+</Note>
+
+---
+
+## Principle 3: Proper VLAN segmentation with firewall rules
+
+<Warning>
+  **v2 pain point:** VLANs existed but had no enforced firewall rules. IoT devices could reach internal services. Segmentation was cosmetic, not functional.
+</Warning>
+
+### The problem
+
+v2 had VLANs but no firewall policy between them. This created:
+
+- **False security** — Network appeared segmented but wasn't
+- **Lateral movement risk** — Compromised IoT device could reach Proxmox management interface
+- **No blast radius containment** — A breach anywhere was a breach everywhere
+
+### The v3 solution
+
+**Four VLANs with explicit firewall rules enforced at the UniFi Dream Machine SE:**
+
+| VLAN ID | Name | Subnet | Purpose |
+|---------|------|--------|----------|
+| **10** | Management | 192.168.10.0/24 | Proxmox hosts, NAS management, network gear |
+| **20** | Trusted | 192.168.20.0/24 | Personal devices, legacy v2 services during migration |
+| **30** | Services | 192.168.30.0/24 | All v3 VMs and LXCs |
+| **40** | IoT | 192.168.40.0/24 | Smart home devices, printers—internet-only access |
+
+**Default policy:** Deny all inter-VLAN traffic. Explicit allow rules only.
+
+Example rules:
+
+- ✅ Trusted → Services (users reach internal services)
+- ✅ Trusted → Management on ports 8006, 22, 443 (admin access to Proxmox)
+- ❌ Services → Management (services cannot touch infrastructure)
+- ❌ IoT → any internal VLAN (full isolation)
+
+<Tip>
+  VLAN 1 is intentionally **not** used for management. VLAN 1 is the default untagged VLAN—management should never be an accidental landing zone.
+</Tip>
+
+---
+
+## Principle 4: UPS protection
+
+<Warning>
+  **v2 pain point:** No UPS. Power outages caused unclean shutdowns, leading to filesystem corruption on Unraid and occasional VM disk issues.
+</Warning>
+
+### The problem
+
+v2 ran without UPS protection. Power loss scenarios:
+
+- Proxmox VMs halted mid-write
+- Unraid parity array interrupted during write operations
+- Risk of silent data corruption on XFS filesystems
+- No graceful shutdown sequence
+
+### The v3 solution
+
+**APC Back-UPS 1500VA with NUT (Network UPS Tools) integration:**
+
+1. **NUT server** runs on Unraid (nas-prod-01) — UPS connects via USB
+2. **NUT clients** run on both Proxmox nodes
+3. **Graceful shutdown sequence:**
+   - UPS detects power loss or low battery
+   - NUT server signals all clients
+   - Proxmox nodes shut down all VMs/LXCs gracefully
+   - Proxmox hypervisors shut down
+   - Unraid confirms all nodes are offline, then shuts itself down last
+
+<Note>
+  UPS purchase and installation is **Phase 0, Task 1**—before any new hardware is powered on. This is non-negotiable.
+</Note>
+
+Benefits:
+
+- **Data integrity** — No more interrupted writes to parity arrays or ZFS pools
+- **Unattended operation** — Power loss at 3 AM doesn't require manual intervention
+- **Orderly recovery** — Everything comes back up cleanly when power returns
+
+---
+
+## Principle 5: Kubernetes-ready architecture
+
+<Note>
+  v3 is designed to support a future Kubernetes cluster (Phase 6), but **Kubernetes is not deployed at launch**.
+</Note>
+
+### The forward-looking design
+
+v2 was never designed with Kubernetes in mind. Adding it later would require:
+
+- Redesigning network segmentation
+- Rethinking storage architecture
+- Rebuilding service configs
+
+v3 makes deliberate architectural choices **now** that pay dividends **later**:
+
+| Decision | Kubernetes benefit |
+|----------|--------------------|
+| **Traefik as reverse proxy** | Traefik is the default k3s ingress controller—same tool, same mental model |
+| **Separate Services VLAN** | k3s worker nodes slot into VLAN 30 without network redesign |
+| **Dedicated Authentik VM** | IdP runs outside the cluster, avoiding bootstrapping circular dependencies |
+| **ZFS mirror pool on NAS** | Provides backing storage for Longhorn PVCs with snapshot support |
+| **Resource headroom on MS-A2** | 64GB RAM and 16-core CPU can host k3s control plane + workers |
+
+### Sandbox-first approach
+
+<Warning>
+  Production services do **not** migrate to Kubernetes until the cluster is proven stable in an isolated sandbox environment.
+</Warning>
+
+Phase 6 (Kubernetes) is structured as:
+
+1. **Sandbox phase** — Lab cluster on VMs with test workloads only
+2. **Learning phase** — Break things, recover, gain operational confidence
+3. **Selective migration** — Move services that benefit from k8s (Immich, Authentik, monitoring)
+4. **Intentional non-migration** — ARR stack and torrent services stay in Docker (hardlinks don't translate well to k8s)
+
+<Tip>
+  The goal is **competence before production**—Phase 6 doesn't start until Phase 5 (operational hardening) is fully stable.
+</Tip>
+
+---
+
+## Additional guiding principles
+
+Beyond the five core commitments, v3 follows these operational principles:
+
+### Document everything
+
+- Every architectural decision has written rationale (see [Key Decisions Log](#))
+- Every service has runbook-style documentation
+- Every phase has entry criteria, exit criteria, and task lists
+
+**Why:** Future you will forget why you made a decision. Write it down now.
+
+### No premature optimization
+
+- Cache pool on Unraid? Not installed at launch—no workload justifies it yet.
+- Dual 10GbE links? Unnecessary—single DAC saturates current I/O.
+- Dedicated GPU for transcoding? Intel QuickSync handles current load.
+
+**Why:** Don't buy hardware to solve problems you don't have.
+
+### Hardlinks are non-negotiable
+
+- Downloads and media **must** live on the same filesystem
+- ARR stack and qBittorrent depend on atomic moves and hardlinks
+- Any architecture that breaks hardlinks is rejected
+
+**Why:** Breaking hardlinks causes silent file duplication and kills torrent seeding.
+
+### Build in phases, not big-bang
+
+- Each phase has clear deliverables and validation steps
+- Phases are sequential—no skipping ahead
+- v2 stays running while v3 is built in parallel
+- Cutover per-service via DNS rewrites, not all-at-once
+
+**Why:** Big-bang migrations have big-bang failure modes. Gradual cutover allows instant rollback.
+
+### Favor simplicity over elegance
+
+- Plex gets a direct port forward, not a reverse proxy (simpler, proven, works)
+- Unraid gets i5-13400 instead of i5-13600 (NAS is I/O-bound, not compute-bound)
+- Single Docker VM instead of multiple (multi-VM Docker doesn't solve HA and adds complexity)
+
+**Why:** Simple solutions fail in simple, predictable ways. Elegant solutions fail mysteriously.
+
+---
+
+## Anti-patterns explicitly avoided
+
+v3 intentionally rejects these common homelab patterns:
+
+<AccordionGroup>
+  <Accordion title="Running NAS as a VM">
+    **Rejected.** Creates circular dependency between hypervisor and storage. v3 uses bare-metal NAS.
+  </Accordion>
+
+  <Accordion title="Single NVMe boot drive on primary hypervisor">
+    **Rejected.** Single point of failure for all services. v3 uses ZFS RAID-1 mirrored NVMe.
+  </Accordion>
+
+  <Accordion title="VLANs without firewall rules">
+    **Rejected.** Cosmetic security with no enforcement. v3 implements explicit deny-all with allow rules.
+  </Accordion>
+
+  <Accordion title="Skipping UPS protection">
+    **Rejected.** Unclean shutdowns risk silent data corruption. v3 requires UPS before power-on.
+  </Accordion>
+
+  <Accordion title="Migrating to Kubernetes without sandbox testing">
+    **Rejected.** Production-first k8s migration has high blast radius. v3 requires sandbox-first approach.
+  </Accordion>
+
+  <Accordion title="Using cache pool for downloads share">
+    **Rejected.** Breaks hardlinks between downloads and media. v3 writes downloads direct to parity array.
+  </Accordion>
+
+  <Accordion title="Running multiple Docker VMs for 'high availability'">
+    **Rejected.** Multi-VM Docker without k8s doesn't provide real HA, just added complexity. v3 uses single Docker VM until k3s.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## When to revisit these principles
+
+These principles are commitments for v3, not immutable laws. Revisit when:
+
+- **Workload characteristics fundamentally change** — e.g., transcoding demand exceeds QuickSync capacity → consider discrete GPU
+- **New technology matures** — e.g., TrueNAS SCALE adds feature parity with Unraid → reevaluate NAS platform
+- **Scale increases by an order of magnitude** — e.g., 10x more users → rethink single-node architecture
+
+Until then, **trust the design**. These principles exist because v2's pain points were real and expensive.
+
+<Tip>
+  When you're tempted to deviate, ask: "What problem does this solve that I actually have right now?" If the answer is hypothetical, don't build it yet.
+</Tip>
+
+---
+
+## Summary
+
+v3's design philosophy in one paragraph:
+
+> Build deliberately, document thoroughly, and prioritize reliability over experimentation. Separate storage from compute. Protect the hypervisor boot drive. Enforce network segmentation with real firewall rules. Protect against power loss. Design for Kubernetes but don't deploy it until you're ready. Build in phases, cut over gradually, and maintain the ability to roll back. Simple solutions that work beat elegant solutions that fail mysteriously.
+
+Every decision in v3 traces back to these principles.

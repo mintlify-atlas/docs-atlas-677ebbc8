@@ -1,0 +1,459 @@
+---
+title: Backup & Restore
+description: Multi-tier backup strategy, PBS configuration, and restore procedures
+---
+
+## Backup Strategy Overview
+
+Homelab v3 implements a five-tier backup strategy designed to protect against different failure scenarios — from accidental deletions to complete site loss.
+
+### Multi-Tier Backup Architecture
+
+| Tier | What | Tool | Destination | Recovery Speed |
+|------|------|------|-------------|----------------|
+| **Tier 0** | VM/LXC snapshots | Proxmox Backup Server (PBS) | pbs-prod-01 VM → ZFS mirror share on NAS | Minutes |
+| **Tier 1** | Docker appdata + stacks | Hardened rsync script + Healthchecks | NAS /backups share (ZFS mirror pool) | Minutes |
+| **Tier 1** | Plex database | Dedicated backup script | NAS /backups/plex/db | Minutes |
+| **Tier 2** | NAS share snapshots | Unraid ZFS snapshots | Local ZFS snapshots on NAS | Seconds |
+| **Tier 3** | Off-box cold copy | Synology ABB (pull-based) | Synology NAS (SkyHawks) — nightly | Hours |
+| **Tier 4** | Cloud backup | Backblaze B2 | Immich photos, critical backups offsite | Days |
+
+<Warning>
+**PBS backs up VM disk images only** — it does NOT back up application data inside VMs. Application-level backups (Docker appdata, Plex DB) remain essential and run independently of PBS.
+</Warning>
+
+---
+
+## Tier 0: Proxmox Backup Server
+
+### PBS Configuration
+
+PBS runs as a VM (`pbs-prod-01`) on `pve-prod-02` (Optiplex) and backs up all VMs and LXCs on both Proxmox nodes.
+
+<Steps>
+  <Step title="Access PBS Web Interface">
+    Navigate to `https://192.168.30.12:8007`
+    
+    Login with root credentials or Proxmox-linked account.
+  </Step>
+
+  <Step title="Configure Datastore">
+    **Datastore → Add Datastore**
+    
+    - Name: `backup-storage`
+    - Backing Path: `/mnt/backups` (NFS mount from NAS ZFS mirror pool)
+    - GC Schedule: `daily` at 02:00
+    - Prune Schedule: Keep last 7 daily, 4 weekly, 3 monthly
+  </Step>
+
+  <Step title="Add Proxmox Nodes as Backup Sources">
+    From each Proxmox node UI:
+    
+    **Datacenter → Storage → Add → Proxmox Backup Server**
+    
+    - ID: `pbs-prod-01`
+    - Server: `192.168.30.12`
+    - Username: `root@pam`
+    - Datastore: `backup-storage`
+    - Fingerprint: (copy from PBS dashboard)
+  </Step>
+
+  <Step title="Create Backup Jobs">
+    On each Proxmox node:
+    
+    **Datacenter → Backup → Add**
+    
+    - Storage: `pbs-prod-01`
+    - Schedule: `daily` at 01:00
+    - Selection Mode: `All`
+    - Compression: `zstd`
+    - Mode: `Snapshot`
+    - Enable: ✓
+  </Step>
+</Steps>
+
+### Restoring from PBS
+
+<Steps>
+  <Step title="Browse Available Backups">
+    In Proxmox UI:
+    
+    **Datacenter → Storage → pbs-prod-01 → Content**
+    
+    Find the VM/LXC backup you need to restore.
+  </Step>
+
+  <Step title="Restore VM or LXC">
+    Right-click the backup → **Restore**
+    
+    - VM ID: (new ID or overwrite existing)
+    - Storage: Select target storage
+    - Start after restore: ✓ (optional)
+  </Step>
+
+  <Step title="Verify Restored System">
+    After restore completes:
+    
+    - Check network configuration (static IPs may need adjustment)
+    - Verify NFS mounts reconnected (`df -h`)
+    - Check application-specific data (see Tier 1 restore)
+  </Step>
+</Steps>
+
+<Warning>
+**Network Configuration**: Restored VMs retain their original IP addresses. If restoring to a different node or as a clone, update `/etc/network/interfaces` or netplan config before starting.
+</Warning>
+
+---
+
+## Tier 1: Application Data Backups
+
+### Docker Appdata Backup
+
+Runs on `docker-prod-01` via hardened rsync script with safety checks.
+
+**Location**: `/opt/scripts/backup-appdata.sh`
+
+**Key Safety Features**:
+- Mountpoint validation (fails if NFS unmounted)
+- Exclusive lockfile (prevents overlapping runs)
+- Healthchecks.io heartbeat monitoring
+- Pre-flight disk space check
+
+<Steps>
+  <Step title="Manual Backup Execution">
+    SSH to `docker-prod-01`:
+    
+    ```bash
+    sudo /opt/scripts/backup-appdata.sh
+    ```
+    
+    Script will:
+    - Verify `/data` is mounted
+    - Acquire lockfile
+    - Rsync `/opt/appdata` → NAS `/backups/docker/appdata`
+    - Rsync `/opt/stacks` → NAS `/backups/docker/stacks`
+    - Ping Healthchecks.io on success
+  </Step>
+
+  <Step title="Verify Backup Completed">
+    Check Healthchecks.io dashboard:
+    
+    `https://healthchecks.io` → `docker-appdata-backup`
+    
+    Should show green checkmark with recent timestamp.
+  </Step>
+</Steps>
+
+### Restoring Docker Appdata
+
+<Steps>
+  <Step title="Stop All Containers">
+    From docker-prod-01:
+    
+    ```bash
+    cd /opt/stacks
+    docker compose -f arr-stack/compose.yaml down
+    docker compose -f infra-stack/compose.yaml down
+    docker compose -f torrent-stack/compose.yaml down
+    docker compose -f books-stack/compose.yaml down
+    ```
+  </Step>
+
+  <Step title="Restore Appdata from Backup">
+    ```bash
+    # Backup current state (just in case)
+    sudo mv /opt/appdata /opt/appdata.old
+    
+    # Restore from NAS
+    sudo rsync -avH /data/backups/docker/appdata/ /opt/appdata/
+    sudo rsync -avH /data/backups/docker/stacks/ /opt/stacks/
+    
+    # Fix ownership
+    sudo chown -R 2000:2000 /opt/appdata
+    sudo chown -R gio:gio /opt/stacks
+    ```
+  </Step>
+
+  <Step title="Restart Containers">
+    ```bash
+    cd /opt/stacks
+    docker compose -f infra-stack/compose.yaml up -d
+    docker compose -f arr-stack/compose.yaml up -d
+    docker compose -f torrent-stack/compose.yaml up -d
+    docker compose -f books-stack/compose.yaml up -d
+    ```
+  </Step>
+
+  <Step title="Verify Services">
+    Check Homarr dashboard or Dockman:
+    
+    - All containers running
+    - No permission errors in logs
+    - Services accessible via Traefik
+  </Step>
+</Steps>
+
+---
+
+## Tier 1: Plex Database Backup
+
+Dedicated backup script runs on `nas-prod-01` (Unraid) since Plex runs natively there.
+
+**Location**: `/boot/config/plugins/user.scripts/scripts/backup-plex-db/script`
+
+**Schedule**: Daily at 03:00 via Unraid User Scripts plugin
+
+<Steps>
+  <Step title="Manual Plex Backup">
+    From Unraid terminal or SSH:
+    
+    ```bash
+    /boot/config/plugins/user.scripts/scripts/backup-plex-db/script
+    ```
+    
+    Script performs:
+    - Stop Plex container gracefully
+    - Rsync `/mnt/user/appdata/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` → `/mnt/user/backups/plex/db/`
+    - Restart Plex container
+    - Uses EXIT trap to ensure Plex restarts even on failure
+  </Step>
+
+  <Step title="Verify Backup">
+    Check backup directory:
+    
+    ```bash
+    ls -lh /mnt/user/backups/plex/db/
+    ```
+    
+    Should contain recent `com.plexapp.plugins.library.db` and related files.
+  </Step>
+</Steps>
+
+### Restoring Plex Database
+
+<Warning>
+**Stop Plex first**: Never restore Plex database while Plex is running. Corruption risk is high.
+</Warning>
+
+<Steps>
+  <Step title="Stop Plex Container">
+    From Unraid UI or terminal:
+    
+    ```bash
+    docker stop plex
+    ```
+  </Step>
+
+  <Step title="Backup Current Database">
+    ```bash
+    mv "/mnt/user/appdata/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases" \
+       "/mnt/user/appdata/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases.old"
+    ```
+  </Step>
+
+  <Step title="Restore from Backup">
+    ```bash
+    rsync -avH /mnt/user/backups/plex/db/ \
+      "/mnt/user/appdata/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/"
+    ```
+  </Step>
+
+  <Step title="Restart Plex">
+    ```bash
+    docker start plex
+    ```
+    
+    Plex will detect the restored database and rebuild indexes if needed.
+  </Step>
+
+  <Step title="Verify Library">
+    Access Plex web UI → verify libraries are intact and playback works.
+  </Step>
+</Steps>
+
+---
+
+## Tier 2: ZFS Snapshots
+
+Unraid automatically snapshots ZFS mirror pool (`backups` and `photos` shares).
+
+**Purpose**: Instant recovery from accidental deletion or corruption within the last 7 days.
+
+### Viewing Snapshots
+
+From Unraid terminal:
+
+```bash
+# List all snapshots for backups pool
+zfs list -t snapshot -r backups
+
+# List all snapshots for photos pool
+zfs list -t snapshot -r photos
+```
+
+### Restoring from ZFS Snapshot
+
+<Steps>
+  <Step title="Identify Target Snapshot">
+    ```bash
+    zfs list -t snapshot -r backups | grep "2026-03-01"
+    ```
+    
+    Note the full snapshot name, e.g., `backups@auto-2026-03-01_0000`
+  </Step>
+
+  <Step title="Restore Specific File or Directory">
+    Snapshots are accessible at `.zfs/snapshot/` in the dataset root:
+    
+    ```bash
+    # Browse snapshot
+    ls -la /mnt/backups/.zfs/snapshot/auto-2026-03-01_0000/docker/appdata/
+    
+    # Copy specific file back
+    cp /mnt/backups/.zfs/snapshot/auto-2026-03-01_0000/docker/appdata/sonarr/config.xml \
+       /mnt/backups/docker/appdata/sonarr/
+    ```
+  </Step>
+
+  <Step title="Rollback Entire Dataset (Destructive)">
+    <Warning>
+    **This destroys all changes made after the snapshot**. Only use if full rollback is required.
+    </Warning>
+    
+    ```bash
+    zfs rollback backups@auto-2026-03-01_0000
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Tier 3: Off-Site Cold Copy (Synology)
+
+Synology Active Backup for Business (ABB) runs on separate Synology NAS and pulls backups nightly.
+
+**Pull-based**: NAS credentials on Synology are read-only. If Synology is compromised, attacker cannot modify or delete primary backups.
+
+### Verifying Synology Backups
+
+<Steps>
+  <Step title="Access Synology ABB Dashboard">
+    Login to Synology DSM → Active Backup for Business
+  </Step>
+
+  <Step title="Check Backup Status">
+    Verify:
+    - Last successful backup timestamp (should be within 24 hours)
+    - Data transferred size
+    - No errors in activity log
+  </Step>
+
+  <Step title="Test Restore (Quarterly)">
+    Perform a test restore of a small directory to verify backup integrity:
+    
+    - Select backup task → Restore
+    - Choose specific files or folders
+    - Restore to test location
+    - Verify contents match expected state
+  </Step>
+</Steps>
+
+---
+
+## Tier 4: Cloud Backup (Backblaze B2)
+
+**Status**: Future implementation
+
+**Target Data**:
+- Immich photo library (`/data/photos`)
+- Critical backup metadata
+- Plex database backups
+
+**Tool**: `rclone` with encryption
+
+**Schedule**: Weekly, overnight during low-bandwidth periods
+
+---
+
+## Backup Monitoring
+
+All automated backups report to Healthchecks.io for heartbeat monitoring.
+
+**Healthchecks Dashboard**: `https://healthchecks.io`
+
+**Monitored Jobs**:
+- `docker-appdata-backup` — Daily 04:00
+- `plex-db-backup` — Daily 03:00
+- `pbs-backup-pve-prod-01` — Daily 01:00
+- `pbs-backup-pve-prod-02` — Daily 01:30
+
+### Setting Up New Backup Monitoring
+
+<Steps>
+  <Step title="Create Healthcheck">
+    Healthchecks.io dashboard → Add Check
+    
+    - Name: `service-name-backup`
+    - Period: `1 day` (or appropriate interval)
+    - Grace: `1 hour`
+  </Step>
+
+  <Step title="Copy Ping URL">
+    Copy the unique ping URL, e.g., `https://hc-ping.com/abc123...`
+  </Step>
+
+  <Step title="Add to Backup Script">
+    At the end of your backup script, on success:
+    
+    ```bash
+    # Ping Healthchecks on success
+    curl -fsS --retry 3 https://hc-ping.com/abc123... > /dev/null
+    ```
+  </Step>
+
+  <Step title="Test">
+    Run backup script manually and verify green checkmark appears in Healthchecks dashboard.
+  </Step>
+</Steps>
+
+---
+
+## Disaster Recovery Scenarios
+
+### Scenario 1: Accidental File Deletion
+
+**Recovery Time**: Seconds to minutes
+
+**Steps**:
+1. Check ZFS snapshots first (Tier 2) — fastest recovery
+2. If older than snapshot retention, restore from rsync backup (Tier 1)
+
+### Scenario 2: Docker VM Corruption
+
+**Recovery Time**: 30-60 minutes
+
+**Steps**:
+1. Restore VM from PBS (Tier 0)
+2. Restore appdata from rsync backup (Tier 1)
+3. Restart containers
+
+### Scenario 3: NAS Failure
+
+**Recovery Time**: 4-8 hours
+
+**Steps**:
+1. Replace failed hardware
+2. Rebuild Unraid array
+3. Restore from Synology ABB (Tier 3)
+4. Rebuild VM/LXC from PBS (Tier 0 backups survive on separate VM)
+
+### Scenario 4: Complete Site Loss (Fire/Flood)
+
+**Recovery Time**: Days to weeks
+
+**Steps**:
+1. Restore photos and critical data from Backblaze B2 (Tier 4)
+2. Rebuild infrastructure from IaC repository
+3. Media library must be re-downloaded (acceptable loss)
+4. Plex database restored from B2 retains watch history and metadata

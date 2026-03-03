@@ -1,0 +1,181 @@
+---
+title: "Phase 3 — Proxmox Rebuild & Core VM Infrastructure"
+description: "Fresh Proxmox install, cluster setup, and core infrastructure VMs"
+icon: "server"
+---
+
+<Info>
+**Status:** Planned
+
+**Category:** Compute Layer
+</Info>
+
+## Objective
+
+Fresh Proxmox install on MS-A2 and Optiplex. Core infrastructure VMs and LXCs standing up. **Services are NOT migrated yet.**
+
+## Entry Criteria
+
+<Check>
+  Phase 2 complete — NAS healthy, NFS exports verified
+</Check>
+
+## Proxmox Cluster Design
+
+- **Two-node Proxmox cluster:** pve-prod-01 (MS-A2) + pve-prod-02 (Optiplex)
+- **Cluster purpose:** Unified management only — one web UI to manage both nodes
+- **HA (High Availability) is NOT enabled** — pve-prod-02 cannot handle pve-prod-01's workload
+- **QDevice on pi-prod-01** acts as tiebreaker to prevent split-brain
+- **PBS on pve-prod-02** backs up all VMs on both nodes
+
+<Info>
+**Clustering vs HA**
+
+Clustering = one unified management UI for both nodes.
+
+HA = automatic VM migration on node failure.
+
+These are **independent features**. We enable clustering for convenience. We do not enable HA because it requires matched hardware and a 3+ node quorum to be meaningful.
+</Info>
+
+## VM & LXC Layout
+
+### pve-prod-01 (MS-A2, Primary)
+
+| Guest | Type | RAM | IP | Notes |
+|-------|------|-----|----|---------|
+| docker-prod-01 | VM (Ubuntu 24.04) | 16–20GB | 192.168.30.11 | All media/app containers. Traefik at this IP. |
+| auth-prod-01 | VM (Debian) | 2GB | 192.168.30.13 | Authentik IdP. Dedicated VM — LXC has stability issues. |
+| immich-prod-01 | VM (Ubuntu 24.04) | 4–6GB | 192.168.30.14 | Immich photo server + ML worker. Isolated for resource tuning. |
+| dns-prod-01 | LXC (Debian) | 512MB | 192.168.30.10 | Primary AdGuard Home. |
+
+### pve-prod-02 (Optiplex, Secondary)
+
+| Guest | Type | RAM | IP | Notes |
+|-------|------|-----|----|---------|
+| pbs-prod-01 | VM (Debian) | 4GB | 192.168.30.12 | Proxmox Backup Server. Backs up all VMs on both nodes. |
+| dns-prod-02 | LXC (Debian) | 512MB | 192.168.30.15 | Secondary AdGuard Home. Synced from dns-prod-01 via adguardhome-sync. |
+
+## Tasks
+
+<Steps>
+  <Step title="MS-A2 (pve-prod-01) — Install Proxmox">
+    - Install Proxmox VE on 2x NVMe RAID-1 mirror (select ZFS RAID-1 during installer)
+    - Set hostname: `pve-prod-01`
+    - Configure Proxmox management interface on Management VLAN 10 (192.168.10.11)
+    - Add NAS NFS shares as Proxmox storage (media, backups, isos)
+  </Step>
+  
+  <Step title="MS-A2 — Create AdGuard LXC (dns-prod-01)">
+    - Create AdGuard LXC on Services VLAN 30
+    - Hostname: `dns-prod-01`
+    - IP: 192.168.30.10
+    - Configure AdGuard: DNS rewrites, upstream resolvers, carry forward v2 config
+    - Point DHCP (UDM-SE) to dns-prod-01 IP as primary DNS
+  </Step>
+  
+  <Step title="MS-A2 — Create Docker Host VM (docker-prod-01)">
+    - Create Ubuntu 24.04 VM on Services VLAN 30
+    - Hostname: `docker-prod-01`
+    - IP: 192.168.30.11
+    - Allocate 16–20GB RAM, 4–6 vCPU
+    - Mount NFS at `/data` → `/mnt/user` on nas-prod-01
+    - Install Docker + Docker Compose
+    - Create `/opt/stacks` and `/opt/appdata` directory structure
+    - Install Cockpit + cockpit-files plugin for web-based management
+  </Step>
+  
+  <Step title="Optiplex (pve-prod-02) — Install Proxmox">
+    - Install Proxmox VE
+    - Set hostname: `pve-prod-02`
+    - Configure management interface on Management VLAN 10 (192.168.10.12)
+  </Step>
+  
+  <Step title="Optiplex — Create PBS VM (pbs-prod-01)">
+    - Create PBS VM
+    - Hostname: `pbs-prod-01`
+    - IP: 192.168.30.12
+    - Add PBS NFS storage target → NAS /backups share
+    - Configure PBS to back up VMs on pve-prod-01
+  </Step>
+  
+  <Step title="NUT Clients — Graceful Shutdown on Power Loss">
+    - Install NUT client on pve-prod-01: `apt install nut-client`
+    - Install NUT client on pve-prod-02: `apt install nut-client`
+    - Configure `/etc/nut/upsmon.conf` on each node to point at nas-prod-01 NUT server
+    - Configure shutdown action: on UPS critical signal, gracefully shut down all VMs then Proxmox host
+    - Test graceful shutdown: simulate power event, verify VMs stop cleanly before hypervisor
+  </Step>
+  
+  <Step title="Proxmox Cluster + QDevice">
+    - Create Proxmox cluster on pve-prod-01 first (Datacenter → Cluster → Create)
+    - Install QDevice support on pi-prod-01: `apt install corosync-qdevice`
+    - Add QDevice from pve-prod-01: `pvecm qdevice setup <pi-prod-01-ip>`
+    - Join pve-prod-02 to cluster (Datacenter → Cluster → Join)
+    - Verify both nodes visible under single Proxmox UI
+    - Confirm HA is NOT enabled — clustering for management convenience only
+  </Step>
+</Steps>
+
+## NUT Graceful Shutdown
+
+NUT (Network UPS Tools) provides fully automated graceful shutdown on power loss.
+
+<Steps>
+  <Step title="NUT Server (nas-prod-01)">
+    NUT server runs on nas-prod-01 — Unraid has NUT built into Community Apps. UPS connects to nas-prod-01 via USB.
+  </Step>
+  
+  <Step title="NUT Clients (Proxmox Nodes)">
+    NUT clients run on pve-prod-01 and pve-prod-02 — receive low battery signal and trigger graceful Proxmox shutdown.
+  </Step>
+  
+  <Step title="Shutdown Sequence">
+    Proxmox shutdown sequence: VMs and LXCs shut down first, then hypervisor OS. Unraid shuts itself down last after both Proxmox nodes are confirmed off.
+  </Step>
+</Steps>
+
+**Result:** Fully automated graceful shutdown on power loss even when unattended.
+
+## Proxmox Boot Redundancy
+
+- **MS-A2:** 2x NVMe configured as ZFS mirror in Proxmox installer — single drive failure does not kill the hypervisor
+- **Optiplex:** Single NVMe is acceptable given its secondary/non-critical role
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="Proxmox healthy on both nodes" icon="check">
+    - pve-prod-01 web UI accessible at https://192.168.10.11:8006
+    - pve-prod-02 web UI accessible at https://192.168.10.12:8006
+    - Both nodes clustered and visible from single UI
+    - Mirrored NVMe boot on MS-A2 (zpool status shows mirror)
+  </Accordion>
+  
+  <Accordion title="AdGuard LXC running — DNS working" icon="network-wired">
+    - dns-prod-01 LXC running
+    - AdGuard Home web UI accessible
+    - DHCP clients using dns-prod-01 as DNS
+    - DNS queries resolving correctly
+  </Accordion>
+  
+  <Accordion title="docker-host VM running — NFS mounts verified" icon="docker">
+    - docker-prod-01 VM running
+    - NFS mount at /data verified
+    - Docker installed and running
+    - Cockpit web UI accessible
+  </Accordion>
+  
+  <Accordion title="PBS running and taking test backups" icon="database">
+    - pbs-prod-01 VM running
+    - PBS web UI accessible
+    - Test backup of docker-prod-01 successful
+    - NFS storage target to NAS /backups share configured
+  </Accordion>
+</AccordionGroup>
+
+## Next Phase
+
+<Card title="Phase 4 — Service Migration" icon="arrows-turn-to-dots" href="/phases/phase-4-services">
+  Migrate all services from v2 to v3 in waves
+</Card>

@@ -1,0 +1,188 @@
+---
+title: "Phase 6 — Kubernetes (k3s/Talos)"
+description: "Future k3s deployment — sandbox first, production migration only after proven stable"
+icon: "cubes"
+---
+
+<Warning>
+**Status:** Future Phase — Do Not Start Until Phase 5 Stable
+
+This is a dedicated sub-project with its own runbook. It is listed here for architectural awareness — v3 hardware and network design consciously leaves headroom for it.
+</Warning>
+
+## Objective
+
+Introduce Kubernetes as an **isolated learning cluster**. No production services migrate until the cluster is fully understood and stable. Build skills deliberately — sandbox phase is complete before any production workload is considered.
+
+## Entry Criteria
+
+<Check>
+  Phase 5 complete — all backup tiers validated, monitoring confirmed, v3 documented and stable
+</Check>
+
+## Locked Approach
+
+<Info>
+**Sandbox First. Production Later.**
+
+Production services stay on Docker until k3s is proven stable and operator is comfortable. The sandbox cluster runs in parallel — failure there has zero impact on running services.
+
+Only after sandbox phase is complete will selective production migration begin.
+</Info>
+
+## Planned Architecture
+
+### Cluster Design
+
+- **Talos Linux VMs** on both Proxmox nodes
+- **MS-A2:** Talos control plane VM + Talos worker 1
+- **Optiplex:** Talos worker 2
+- **Storage:** Longhorn for PVCs inside the cluster
+- **Ingress:** Traefik ingress controller (familiar from Docker context — same mental model)
+- **GitOps:** Flux or ArgoCD
+
+### Tooling to Learn
+
+<CardGroup cols={2}>
+  <Card title="Core Kubernetes" icon="cubes">
+    - kubectl
+    - Pods, deployments, services, namespaces
+    - ConfigMaps, Secrets
+  </Card>
+  <Card title="Storage" icon="hard-drive">
+    - Longhorn
+    - PVCs and PVs
+    - Storage classes
+  </Card>
+  <Card title="Networking" icon="network-wired">
+    - Traefik ingress controller
+    - cert-manager for TLS
+    - Ingress resources
+  </Card>
+  <Card title="GitOps & Automation" icon="git">
+    - Flux or ArgoCD
+    - Helm charts
+    - Operators
+  </Card>
+</CardGroup>
+
+## Sandbox Phase (No Production Traffic)
+
+<Steps>
+  <Step title="Stand Up Cluster">
+    - Create Talos VMs on pve-prod-01 and pve-prod-02
+    - Bootstrap Talos cluster
+    - Configure kubectl access
+  </Step>
+  
+  <Step title="Learn Core Primitives">
+    - Deploy test workloads
+    - Learn pods, deployments, services, namespaces
+    - Understand ConfigMaps and Secrets
+  </Step>
+  
+  <Step title="Configure Storage">
+    - Install Longhorn
+    - Create storage classes
+    - Test PVC binding
+  </Step>
+  
+  <Step title="Configure Ingress">
+    - Install Traefik ingress controller
+    - Install cert-manager
+    - Test TLS certificate issuance
+  </Step>
+  
+  <Step title="Learn GitOps">
+    - Install Flux or ArgoCD
+    - Deploy test apps via GitOps
+    - Understand reconciliation loops
+  </Step>
+  
+  <Step title="Break Things and Recover">
+    Deliberately break things and recover — that is the point of the sandbox
+  </Step>
+</Steps>
+
+## Production Migration Candidates (Post-Sandbox Only)
+
+<Info>
+These services **benefit from HA and operator-managed upgrades** — they are good candidates for k3s migration once the cluster is stable.
+</Info>
+
+| Service | Reason |
+|---------|--------|
+| Immich | Benefits from HA and operator-managed upgrades |
+| Authentik | IdP should be highly available |
+| Beszel / Uptime Kuma | Monitoring infrastructure |
+| Traefik | Already the ingress controller in k3s, natural fit |
+
+## Intentionally Staying in Docker
+
+<Warning>
+These services have **filesystem dependencies** or **network complexity** that do not translate cleanly to k8s. They stay in Docker permanently.
+</Warning>
+
+| Service | Reason |
+|---------|--------|
+| ARR stack (Sonarr, Radarr, Prowlarr, Bazarr) | Hardlinks and atomic moves make k8s messy |
+| qBittorrent + Gluetun | VPN killswitch model does not translate cleanly to k8s networking |
+| Books stack (CWA, ABS, Shelfmark) | Ingest/hardlink workflows are filesystem-dependent |
+
+## VM Resource Allocation
+
+| VM | Host | vCPU | RAM | Role |
+|----|------|------|-----|------|
+| k3s-ctrl-lab-01 | pve-prod-01 | 2 | 4GB | Control plane |
+| k3s-work-lab-01 | pve-prod-01 | 4 | 8GB | Worker node |
+| k3s-work-lab-02 | pve-prod-02 | 4 | 8GB | Worker node |
+
+## Key Constraints
+
+<Warning>
+**Do Not Rush Phase 6**
+
+A broken k3s cluster on top of an unstable foundation helps nobody. **Phase 5 fully stable** — reliable backups, clean monitoring, solid documentation — is the only acceptable entry point for Phase 6.
+</Warning>
+
+<Info>
+**No Production Services Until Sandbox Complete**
+
+The sandbox cluster runs in parallel with production Docker services. Zero production traffic touches the k3s cluster until it is proven stable.
+</Info>
+
+## Learning Resources
+
+- [Talos Linux Documentation](https://www.talos.dev/)
+- [Longhorn Documentation](https://longhorn.io/docs/)
+- [Traefik Kubernetes Ingress](https://doc.traefik.io/traefik/providers/kubernetes-ingress/)
+- [Flux Documentation](https://fluxcd.io/docs/)
+- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="Sandbox cluster stable for 30+ days" icon="check">
+    - No unexpected crashes or restarts
+    - All test workloads running reliably
+    - Storage, networking, and ingress working as expected
+  </Accordion>
+  
+  <Accordion title="Operator comfortable with k8s tooling" icon="graduation-cap">
+    - kubectl commands second nature
+    - Troubleshooting pods, logs, events routine
+    - GitOps workflow understood and practiced
+  </Accordion>
+  
+  <Accordion title="Production migration plan documented" icon="book">
+    - Which services migrate first
+    - Rollback plan for each service
+    - Monitoring and alerting for k3s cluster
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+**This Phase Is Its Own Project**
+
+Phase 6 is a dedicated learning environment. It has its own timeline, its own success criteria, and its own documentation. It exists in parallel with production infrastructure — not as a replacement.
+</Info>

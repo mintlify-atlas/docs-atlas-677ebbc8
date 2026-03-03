@@ -1,0 +1,531 @@
+---
+title: Adding New Services
+description: Checklist for deploying new services to the homelab infrastructure
+---
+
+## Overview
+
+This checklist ensures new services are deployed consistently with proper configuration, security, backups, and monitoring.
+
+**Service Deployment Models**:
+- Docker container on `docker-prod-01` (most common)
+- Dedicated VM (resource-intensive services like Immich, Authentik)
+- LXC container (lightweight infrastructure services)
+- Native on Unraid (services requiring NAS direct access)
+
+---
+
+## Pre-Deployment Planning
+
+<Steps>
+  <Step title="Define Service Requirements">
+    Document before deploying:
+    
+    - **Purpose**: What problem does this service solve?
+    - **Users**: Who will use it? (admin only, family, external)
+    - **Resource needs**: RAM, CPU, storage estimates
+    - **Network access**: Internal only, or externally exposed?
+    - **Data persistence**: Stateless or requires database/persistent volumes?
+  </Step>
+
+  <Step title="Choose Deployment Model">
+    **Docker on docker-prod-01** (default):
+    - Service is stateless or uses small database
+    - RAM < 2GB per container
+    - Standard web application
+    
+    **Dedicated VM**:
+    - Service requires > 4GB RAM
+    - Heavy background processing (ML, transcoding)
+    - Benefits from resource isolation
+    - Examples: Immich, Authentik, future k3s nodes
+    
+    **LXC**:
+    - Lightweight infrastructure service
+    - No Docker dependency
+    - Examples: AdGuard Home, lightweight monitoring agents
+    
+    **Unraid Native**:
+    - Requires direct hardware access (iGPU for transcoding)
+    - Needs low-latency NFS access
+    - Example: Plex
+  </Step>
+
+  <Step title="Select Storage Location">
+    **Application data (config, databases)**:
+    - Docker: `/opt/appdata/<service-name>` on VM local disk
+    - VM: Local disk (backed up by PBS)
+    - LXC: Local disk (backed up by PBS)
+    
+    **Media/user content**:
+    - NFS mount from NAS: `/data/<share>/<path>`
+    - Must use same filesystem as related services (hardlink rule)
+  </Step>
+
+  <Step title="Determine Access Requirements">
+    - **Internal only**: Traefik with DNS rewrite in AdGuard
+    - **External (trusted users)**: Cloudflare Tunnel + Cloudflare Access
+    - **External (public)**: Evaluate security posture carefully — consider Authentik SSO + rate limiting
+  </Step>
+</Steps>
+
+---
+
+## Deployment Steps
+
+### Option A: Docker Service on docker-prod-01
+
+<Steps>
+  <Step title="Create Directory Structure">
+    SSH to `docker-prod-01`:
+    
+    ```bash
+    # Appdata directory (persistent config/database)
+    sudo mkdir -p /opt/appdata/<service-name>
+    sudo chown -R 2000:2000 /opt/appdata/<service-name>
+    
+    # Stack directory (compose file)
+    mkdir -p /opt/stacks/<stack-name>
+    ```
+  </Step>
+
+  <Step title="Create Compose File">
+    Create `/opt/stacks/<stack-name>/compose.yaml`:
+    
+    ```yaml
+    version: '3.8'
+    
+    services:
+      <service-name>:
+        image: <image-name>:latest
+        container_name: <service-name>
+        restart: unless-stopped
+        environment:
+          - PUID=2000
+          - PGID=2000
+          - TZ=America/Chicago
+        volumes:
+          - /opt/appdata/<service-name>:/config
+          - /data:/data  # If NFS access needed
+        networks:
+          - traefik
+        labels:
+          - "traefik.enable=true"
+          - "traefik.http.routers.<service-name>.rule=Host(`<service-name>.giohosted.com`)"
+          - "traefik.http.routers.<service-name>.entrypoints=websecure"
+          - "traefik.http.routers.<service-name>.tls.certresolver=cloudflare"
+          - "traefik.http.services.<service-name>.loadbalancer.server.port=<port>"
+    
+    networks:
+      traefik:
+        external: true
+    ```
+    
+    <Warning>
+    **Use `PUID=2000` and `PGID=2000`** for all containers accessing NFS mounts. This matches the NFS export permissions.
+    </Warning>
+  </Step>
+
+  <Step title="Deploy Service">
+    ```bash
+    cd /opt/stacks/<stack-name>
+    docker compose up -d
+    ```
+    
+    Check logs:
+    ```bash
+    docker compose logs -f <service-name>
+    ```
+  </Step>
+
+  <Step title="Add DNS Rewrite (Internal Access)">
+    AdGuard Home → **Filters → DNS Rewrites → Add**
+    
+    - Domain: `<service-name>.giohosted.com`
+    - Answer: `192.168.30.11` (Traefik on docker-prod-01)
+    
+    Wait for `adguardhome-sync` to propagate to `dns-prod-02` (usually < 1 minute).
+  </Step>
+
+  <Step title="Test Access">
+    From browser on trusted VLAN:
+    
+    `https://<service-name>.giohosted.com`
+    
+    Should load with valid TLS certificate (wildcard cert from Traefik).
+  </Step>
+</Steps>
+
+### Option B: Dedicated VM
+
+<Steps>
+  <Step title="Create VM in Proxmox">
+    Proxmox UI → **[Select Node] → Create VM**
+    
+    **General**:
+    - VM ID: Next available (e.g., 103)
+    - Name: `<service-name>-prod-01`
+    
+    **OS**:
+    - ISO: Ubuntu 24.04 or Debian 12 (from `nas-prod-01:/isos`)
+    
+    **System**:
+    - SCSI Controller: VirtIO SCSI
+    - Qemu Agent: ✓ Enable
+    
+    **Disks**:
+    - Storage: local-lvm
+    - Size: (estimate + 50% headroom)
+    - Discard: ✓ (for thin provisioning)
+    
+    **CPU**:
+    - Cores: (based on workload, typically 2-4)
+    - Type: `host`
+    
+    **Memory**:
+    - RAM: (based on requirements)
+    - Ballooning: Enabled
+    
+    **Network**:
+    - Bridge: `vmbr0`
+    - VLAN Tag: `30` (Services VLAN)
+  </Step>
+
+  <Step title="Install OS and Configure">
+    - Boot VM and complete OS installation
+    - Set static IP in Services VLAN range (192.168.30.x)
+    - Update packages: `apt update && apt dist-upgrade -y`
+    - Install qemu-guest-agent: `apt install qemu-guest-agent`
+  </Step>
+
+  <Step title="Deploy Application">
+    Install Docker or deploy service natively depending on requirements.
+    
+    Follow application-specific installation guides.
+  </Step>
+
+  <Step title="Configure PBS Backup">
+    VM is automatically included in nightly PBS backup job (backup job set to "All VMs").
+    
+    Verify after first night:
+    
+    **PBS UI → Backup Jobs → [Check Latest Run]**
+  </Step>
+</Steps>
+
+### Option C: LXC Container
+
+<Steps>
+  <Step title="Create LXC in Proxmox">
+    Proxmox UI → **[Select Node] → Create CT**
+    
+    **General**:
+    - CT ID: Next available
+    - Hostname: `<service-name>-prod-01`
+    - Unprivileged: ✓ (default)
+    
+    **Template**:
+    - Storage: local
+    - Template: Debian 12 or Ubuntu 24.04
+    
+    **Root Disk**:
+    - Storage: local-lvm
+    - Size: 8-16 GB (LXCs are lightweight)
+    
+    **CPU**:
+    - Cores: 1-2
+    
+    **Memory**:
+    - RAM: 512 MB - 2 GB
+    - Swap: 512 MB
+    
+    **Network**:
+    - Bridge: `vmbr0`
+    - VLAN Tag: `30`
+    - IPv4: Static (192.168.30.x/24)
+    - Gateway: 192.168.30.1
+  </Step>
+
+  <Step title="Start and Configure LXC">
+    Start LXC and attach console:
+    
+    **Proxmox UI → [Select LXC] → Console**
+    
+    ```bash
+    apt update && apt upgrade -y
+    apt install curl wget sudo
+    ```
+  </Step>
+
+  <Step title="Install Service">
+    Follow service-specific installation for Debian/Ubuntu.
+  </Step>
+</Steps>
+
+---
+
+## Post-Deployment Configuration
+
+<Steps>
+  <Step title="Configure SSO (If Applicable)">
+    If service supports OIDC/OAuth2:
+    
+    **Authentik → Applications → Create**
+    
+    - Name: `<Service Name>`
+    - Slug: `<service-name>`
+    - Provider: Create new OIDC provider
+      - Redirect URI: `https://<service-name>.giohosted.com/oauth/callback` (check service docs)
+      - Scopes: `openid profile email`
+    
+    Configure service to use Authentik OIDC endpoint.
+  </Step>
+
+  <Step title="Add to Cloudflare Tunnel (If External)">
+    Edit cloudflared config on `docker-prod-01`:
+    
+    `/opt/appdata/cloudflared/config.yaml`:
+    
+    ```yaml
+    ingress:
+      - hostname: <service-name>.giohosted.com
+        service: https://192.168.30.11
+        originRequest:
+          originServerName: <service-name>.giohosted.com
+      # ... other services ...
+      - service: http_status:404
+    ```
+    
+    Restart cloudflared:
+    ```bash
+    docker restart cloudflared
+    ```
+  </Step>
+
+  <Step title="Configure Cloudflare Access (If External)">
+    Cloudflare dashboard → **Access → Applications → Add**
+    
+    - Application name: `<Service Name>`
+    - Subdomain: `<service-name>`
+    - Domain: `giohosted.com`
+    - Policy: Require Authentik OIDC group membership
+  </Step>
+
+  <Step title="Add to Homarr Dashboard">
+    Homarr UI → **Edit Mode → Add Tile**
+    
+    - Name: `<Service Name>`
+    - URL: `https://<service-name>.giohosted.com`
+    - Icon: (select appropriate icon)
+    - Category: (Infrastructure, Media, Books, etc.)
+  </Step>
+
+  <Step title="Add Uptime Monitor">
+    Uptime Kuma (`http://192.168.10.20:3001`):
+    
+    **Add New Monitor**:
+    - Type: HTTP(s)
+    - Name: `<Service Name>`
+    - URL: `https://<service-name>.giohosted.com`
+    - Interval: 120 seconds
+    - Retries: 3
+  </Step>
+
+  <Step title="Configure Backups">
+    **For Docker services**:
+    
+    Appdata is automatically backed up by existing rsync script:
+    - `/opt/appdata/<service-name>` → NAS `/backups/docker/appdata/`
+    
+    **For dedicated VMs**:
+    
+    Automatically included in PBS nightly backup.
+    
+    **For services with databases**:
+    
+    Consider application-specific backup script:
+    ```bash
+    #!/bin/bash
+    # /opt/scripts/backup-<service>-db.sh
+    
+    docker exec <service-name> <db-dump-command> > /opt/appdata/<service>/backup-$(date +%F).sql
+    
+    # Ping Healthchecks.io
+    curl -fsS --retry 3 https://hc-ping.com/<uuid> > /dev/null
+    ```
+    
+    Add to cron:
+    ```bash
+    crontab -e
+    0 3 * * * /opt/scripts/backup-<service>-db.sh
+    ```
+  </Step>
+
+  <Step title="Create Healthcheck (If Backup Added)">
+    Healthchecks.io → **Add Check**
+    
+    - Name: `<service-name>-backup`
+    - Period: 1 day
+    - Grace: 1 hour
+    - Tags: `backups`, `<service-name>`
+  </Step>
+</Steps>
+
+---
+
+## Documentation
+
+<Steps>
+  <Step title="Update Service Inventory">
+    Edit `homelab-docs/services/inventory.md`:
+    
+    Add entry:
+    ```markdown
+    | <Service Name> | <stack-name> | <deployment-type> | <URL> | <Notes> |
+    ```
+  </Step>
+
+  <Step title="Create Service Documentation Page">
+    Create `homelab-docs/services/<service-name>.md`:
+    
+    ```markdown
+    # <Service Name>
+    
+    ## Overview
+    - **Purpose**: <what it does>
+    - **URL**: https://<service-name>.giohosted.com
+    - **Deployment**: <Docker/VM/LXC>
+    - **Location**: <host>
+    
+    ## Configuration
+    - Appdata: `/opt/appdata/<service-name>`
+    - Compose: `/opt/stacks/<stack-name>/compose.yaml`
+    - Database: <if applicable>
+    
+    ## Backups
+    - Tier 0: PBS (VM/LXC only)
+    - Tier 1: rsync appdata backup
+    - Frequency: Daily 04:00
+    
+    ## Troubleshooting
+    <common issues and fixes>
+    ```
+  </Step>
+
+  <Step title="Commit to Git">
+    ```bash
+    cd ~/homelab-docs
+    git add .
+    git commit -m "Add <service-name> service"
+    git push
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Testing & Validation
+
+<Steps>
+  <Step title="Verify Service Functionality">
+    - Login/authentication works
+    - Core features functional
+    - Data persistence (restart container, check data intact)
+  </Step>
+
+  <Step title="Test Internal Access">
+    From device on Trusted VLAN:
+    
+    `https://<service-name>.giohosted.com`
+    
+    Should resolve to Traefik and load service with valid TLS.
+  </Step>
+
+  <Step title="Test External Access (If Configured)">
+    From phone on cellular (not WiFi):
+    
+    `https://<service-name>.giohosted.com`
+    
+    Should:
+    - Route through Cloudflare Tunnel
+    - Prompt for Cloudflare Access authentication
+    - Load service after auth
+  </Step>
+
+  <Step title="Verify Backups Work">
+    Wait for first automated backup to run, then:
+    
+    ```bash
+    # For Docker appdata
+    ls -lh /data/backups/docker/appdata/<service-name>/
+    
+    # For VM (check PBS)
+    # PBS UI → Backups → [Check service VM listed]
+    ```
+  </Step>
+
+  <Step title="Verify Monitoring">
+    - Uptime Kuma shows green status
+    - Beszel agent reporting metrics (if on new VM)
+    - Healthcheck heartbeat received (if backup configured)
+  </Step>
+</Steps>
+
+---
+
+## Common Pitfalls
+
+<Warning>
+**Hardlink Rule Violation**: If service needs to move/link files across directories, ensure all directories are on same NFS mount. Never mix local disk and NFS paths for hardlink-dependent services (ARR stack, torrent clients).
+</Warning>
+
+<Warning>
+**Incorrect PUID/PGID**: Containers accessing NFS must use `PUID=2000` and `PGID=2000`. Using `1000:1000` or `root` will cause permission errors.
+</Warning>
+
+<Warning>
+**Missing Backups**: New services are not automatically backed up unless explicitly configured. Always add to backup script or verify PBS includes the VM.
+</Warning>
+
+<Warning>
+**SSO Misconfiguration**: Authentik OIDC requires correct redirect URIs. Typos or wrong protocol (http vs https) will break login. Always test SSO immediately after configuration.
+</Warning>
+
+---
+
+## Rollback Procedure
+
+If deployment fails or service causes issues:
+
+<Steps>
+  <Step title="Stop Service">
+    **Docker**:
+    ```bash
+    cd /opt/stacks/<stack-name>
+    docker compose down
+    ```
+    
+    **VM/LXC**:
+    Proxmox UI → Shutdown
+  </Step>
+
+  <Step title="Remove from Traefik/DNS">
+    - Remove DNS rewrite from AdGuard
+    - Remove Traefik labels from compose file (or delete compose entirely)
+  </Step>
+
+  <Step title="Remove Monitoring">
+    - Delete Uptime Kuma monitor
+    - Remove from Homarr dashboard
+  </Step>
+
+  <Step title="Clean Up Storage (Optional)">
+    **Keep appdata for 30 days** in case service needs to be redeployed.
+    
+    After 30 days:
+    ```bash
+    sudo rm -rf /opt/appdata/<service-name>
+    rm -rf /opt/stacks/<stack-name>
+    ```
+  </Step>
+</Steps>

@@ -1,0 +1,460 @@
+---
+title: Media Services
+description: Plex media server and ARR stack automation for TV shows, movies, and subtitle management
+---
+
+## Overview
+
+The media stack provides automated content acquisition, organization, and streaming. Services are split between Unraid (Plex for hardware transcoding) and docker-prod-01 (ARR automation stack).
+
+<CardGroup cols={2}>
+  <Card title="Plex" icon="play">
+    Media server with hardware transcoding
+  </Card>
+  <Card title="ARR Stack" icon="download">
+    Automated content management
+  </Card>
+  <Card title="Torrents" icon="seedling">
+    VPN-protected downloading
+  </Card>
+  <Card title="Requests" icon="rectangle-list">
+    User request interface
+  </Card>
+</CardGroup>
+
+## Plex Media Server
+
+**Location:** nas-prod-01 (Unraid native Docker)
+
+**IP Address:** Accessible via Traefik at 192.168.30.11
+
+**Why Unraid?**
+- Direct access to i5-13400 Intel UHD 730 iGPU for QuickSync hardware transcoding
+- No NFS hop - Plex reads media directly from local filesystem
+- No iGPU passthrough complexity
+- QuickSync on 12th/13th gen Intel handles 2+ simultaneous 1080p transcodes
+
+### Hardware Transcoding
+
+**iGPU:** Intel UHD 730 (i5-13400)
+
+**Capability:**
+- 2+ simultaneous 1080p transcodes
+- Hardware-accelerated H.264 and HEVC
+- Tone mapping for HDR content
+- Low power consumption vs dedicated GPU
+
+**Configuration:**
+- Settings → Transcoder → Use hardware acceleration when available: **Enabled**
+- Transcode temp directory: Local Unraid directory (not NFS)
+
+### Library Structure
+
+**Media paths (NFS from Unraid):**
+```
+/mnt/user/media/movies/1080p/    # Radarr 1080p library
+/mnt/user/media/movies/4k/       # Radarr 4K library  
+/mnt/user/media/tv/              # Sonarr TV library
+/mnt/user/media/anime/           # Sonarr Anime library
+/mnt/user/media/books/audiobooks/# Audiobookshelf library
+```
+
+**Plex libraries:**
+- Movies (1080p) - Shared with all users
+- Movies (4K) - Local viewing only (Apple TV 4K via Infuse)
+- TV Shows
+- Anime
+- Audiobooks
+
+### External Access
+
+**Method:** Direct port forwarding (NOT Cloudflare Tunnel)
+
+**Configuration:**
+- UDM-SE port forward: `32400 → nas-prod-01`
+- Plex handles TLS natively
+- Remote access enabled in Plex settings
+
+<Warning>
+Cloudflare ToS prohibits video streaming through tunnels. Plex requires direct port forward for external access.
+</Warning>
+
+### Backup
+
+**Plex database backup script:**
+- Runs nightly via cron on nas-prod-01
+- Stops Plex service
+- Backs up `/opt/appdata/plex/` to NAS `/backups/plex/db`
+- Restarts Plex service
+- Uses EXIT trap to ensure service restart even on failure
+
+**Access:**
+- Internal: `https://plex.giohosted.com`
+- External: `https://app.plex.tv`
+- Configuration: Unraid Docker settings
+
+---
+
+## ARR Stack
+
+**Location:** docker-prod-01 (192.168.30.11)
+
+**Stack:** `/opt/stacks/arr/compose.yaml`
+
+### Services
+
+<CardGroup cols={2}>
+  <Card title="Sonarr (TV)" icon="tv">
+    Regular TV show automation
+  </Card>
+  <Card title="Sonarr (Anime)" icon="star">
+    Anime-specific automation with custom profiles
+  </Card>
+  <Card title="Radarr (1080p)" icon="film">
+    1080p movie automation for shared users
+  </Card>
+  <Card title="Radarr (4K)" icon="film">
+    4K WebDL automation for local viewing
+  </Card>
+</CardGroup>
+
+### Sonarr (TV)
+
+**Purpose:** Automate TV show downloads and organization
+
+**Access:** `https://sonarr.giohosted.com`
+
+**Configuration:**
+- Root folder: `/data/media/tv/`
+- Download client: qBittorrent
+- Indexer management: Prowlarr
+- Quality profiles: TRaSH Guides recommendations
+
+**Download workflow:**
+1. Sonarr monitors RSS feeds via Prowlarr
+2. Selects release matching quality profile
+3. Sends to qBittorrent (via Gluetun VPN)
+4. qBit downloads to `/data/downloads/tv/`
+5. Sonarr detects completion
+6. **Hardlinks** file to `/data/media/tv/` (atomic move, no copy)
+7. Plex detects new file and updates library
+8. Original file remains seeding in `/data/downloads/tv/`
+
+<Note>
+Hardlinks require downloads and media to be on the same filesystem. Both are on Unraid parity array with no cache involvement.
+</Note>
+
+### Sonarr (Anime)
+
+**Purpose:** Separate instance for anime with specialized profiles
+
+**Access:** `https://sonarr-anime.giohosted.com`
+
+**Why separate instance?**
+- Anime release groups use different naming conventions
+- Quality profiles focus on fansub groups vs WEB-DL
+- Different preferred words and must-not-contain filters
+- Separate library organization
+
+**Configuration:**
+- Root folder: `/data/media/anime/`
+- Custom quality profiles for anime releases
+- Preferred release groups configured per TRaSH Guides anime section
+
+### Radarr (1080p)
+
+**Purpose:** Automate 1080p movie downloads for shared users
+
+**Access:** `https://radarr.giohosted.com`
+
+**Configuration:**
+- Root folder: `/data/media/movies/1080p/`
+- Quality profile: 1080p WebDL/Bluray
+- Optimized for streaming without transcoding
+- Shared with all Plex users
+
+### Radarr (4K)
+
+**Purpose:** 4K WebDL movies for local high-quality viewing
+
+**Access:** `https://radarr-4k.giohosted.com`
+
+**Configuration:**
+- Root folder: `/data/media/movies/4k/`
+- Quality profile: 4K WebDL (not remux - file size balance)
+- Target: Apple TV 4K direct play via Infuse
+- Not transcoded for remote users
+
+**Why separate instance?**
+- Different quality requirements (4K WebDL vs 1080p)
+- Separate library in Plex
+- Prevents accidental 4K downloads for shared library
+- Isolated indexer priorities for 4K releases
+
+<Warning>
+4K content should be direct played, not transcoded. Ensure clients support 4K HEVC playback or restrict 4K library access.
+</Warning>
+
+### Prowlarr
+
+**Purpose:** Centralized indexer management for all ARR instances
+
+**Access:** `https://prowlarr.giohosted.com`
+
+**Connected instances:**
+- Sonarr (TV)
+- Sonarr (Anime)
+- Radarr (1080p)
+- Radarr (4K)
+
+**Configuration:**
+- Indexers automatically synced to all ARR apps
+- Single point of indexer management
+- Add indexer once, available everywhere
+- Flaresolverr integration for Cloudflare-protected indexers
+
+### Bazarr
+
+**Purpose:** Automated subtitle downloads
+
+**Access:** `https://bazarr.giohosted.com`
+
+**Configuration:**
+- Syncs with Sonarr and Radarr libraries
+- Preferred languages configured
+- Subtitle providers: OpenSubtitles, Subscene, etc.
+- Automatically downloads missing subtitles
+- Upgrades to better quality subtitles when available
+
+### Supporting Services
+
+**Profilarr:**
+- Manages quality profiles across Sonarr/Radarr instances
+- Syncs TRaSH Guides recommendations
+- Access: `https://profilarr.giohosted.com`
+
+**Maintainerr:**
+- Media lifecycle visibility
+- Shows watched/unwatched statistics
+- Identifies content for potential removal
+- **Note:** Configured for visibility only, no automatic deletion
+- Access: `https://maintainerr.giohosted.com`
+
+**Tautulli:**
+- Plex analytics and monitoring
+- Play statistics and user activity
+- Newsletter generation
+- Access: `https://tautulli.giohosted.com`
+
+**Flaresolverr:**
+- Cloudflare bypass for Prowlarr
+- Proxies requests to Cloudflare-protected indexers
+- Runs as supporting service (no direct access needed)
+
+---
+
+## Torrent Stack
+
+**Location:** docker-prod-01
+
+**Stack:** `/opt/stacks/torrent/compose.yaml`
+
+### Architecture
+
+```
+qBittorrent ←→ Gluetun (VPN killswitch) ←→ ProtonVPN
+     ↑
+   qBitrr (management)
+```
+
+### Gluetun
+
+**Purpose:** VPN killswitch for qBittorrent
+
+**Configuration:**
+- VPN provider: ProtonVPN
+- Server: Chicago (port forwarding support)
+- Protocol: WireGuard
+- Killswitch: Enabled (blocks all traffic if VPN drops)
+
+**Network mode:**
+```yaml
+qbittorrent:
+  network_mode: "service:gluetun"
+```
+
+qBittorrent shares Gluetun's network namespace - all qBit traffic forced through VPN.
+
+**Verification:**
+```bash
+# Check public IP from qBittorrent container
+docker exec qbittorrent curl ifconfig.me
+# Should show ProtonVPN Chicago IP, not residential IP
+```
+
+### qBittorrent
+
+**Purpose:** Torrent download client
+
+**Access:** `https://qbittorrent.giohosted.com`
+
+**Configuration:**
+- Download path: `/data/downloads/`
+- Categories:
+  - `tv` → `/data/downloads/tv/`
+  - `movies` → `/data/downloads/movies/`
+  - `anime` → `/data/downloads/anime/`
+  - `books-ebooks` → `/data/downloads/books/ebooks/downloads/`
+  - `books-audiobooks` → `/data/downloads/books/audiobooks/downloads/`
+
+**Port forwarding:**
+- Automatic via Gluetun integration with ProtonVPN
+- Verified as "Fully Connectable" on private trackers
+
+### qBitrr
+
+**Purpose:** Torrent lifecycle management for all ARR instances
+
+**Replaces:** Custom `qbit-automation` sidecar from v2
+
+**Access:** `https://qbitrr.giohosted.com`
+
+**Features:**
+- Single installation manages all 4 ARR instances
+- Seeding time enforcement (14 days minimum for MAM ebooks/audiobooks)
+- Failed torrent detection and redownload triggering
+- Stalled torrent monitoring
+- Web UI for troubleshooting
+
+**Connected ARR instances:**
+- Sonarr (TV)
+- Sonarr (Anime)  
+- Radarr (1080p)
+- Radarr (4K)
+
+**MAM compliance:**
+```yaml
+seeding:
+  categories:
+    books-ebooks: 14d      # 14 day minimum seed
+    books-audiobooks: 14d  # 14 day minimum seed
+    tv: 7d
+    movies: 7d
+    anime: 7d
+```
+
+---
+
+## Seerr (Request Interface)
+
+**Purpose:** User-facing request portal for movies and TV shows
+
+**Access:** 
+- Internal: `https://request.giohosted.com`
+- External: `https://request.giohosted.com` (via Cloudflare Tunnel)
+
+**Integration:**
+- Connects to Sonarr (TV), Sonarr (Anime), Radarr (1080p), Radarr (4K)
+- Users request content via web interface
+- Requests automatically sent to appropriate ARR instance
+- Status tracking and notifications
+
+**Access control:**
+- Protected by Cloudflare Access
+- Users authenticated via Authentik OIDC
+
+---
+
+## Storage and Hardlinks
+
+### Critical Design Requirement
+
+<Warning>
+Downloads and media MUST be on the same filesystem for hardlinks to work. Both are on Unraid parity array with cache disabled.
+</Warning>
+
+**Why hardlinks matter:**
+1. qBittorrent downloads file to `/data/downloads/tv/show.mkv`
+2. Sonarr creates hardlink at `/data/media/tv/Show/show.mkv`
+3. **Same file, two paths** - zero additional disk usage
+4. File continues seeding from original download location
+5. Deleting either path does not affect the other until both are removed
+
+**What breaks hardlinks:**
+- Downloading to cache pool while media is on array
+- Copying instead of moving/hardlinking
+- Crossing filesystem boundaries
+
+### Directory Structure
+
+**On docker-prod-01 (`/data` = NFS mount to nas-prod-01 `/mnt/user`):**
+
+```
+/data/
+├── media/
+│   ├── movies/
+│   │   ├── 1080p/        # Radarr 1080p library
+│   │   └── 4k/           # Radarr 4K library
+│   ├── tv/             # Sonarr TV library
+│   ├── anime/          # Sonarr Anime library
+│   └── books/
+│       ├── ebooks/
+│       └── audiobooks/
+└── downloads/
+    ├── movies/         # qBit movie staging
+    ├── tv/             # qBit TV staging
+    ├── anime/          # qBit anime staging
+    └── books/
+        ├── ebooks/downloads/
+        └── audiobooks/downloads/
+```
+
+**Verification:**
+```bash
+# Check if two paths are hardlinked
+stat /data/media/tv/Show/episode.mkv
+stat /data/downloads/tv/episode.mkv
+# If inode numbers match, they are hardlinks to the same file
+```
+
+---
+
+## Migration Notes
+
+### 4K Movie Migration (Phase 4)
+
+Existing 4K movies previously managed by single Radarr instance need migration to Radarr (4K):
+
+1. Use Radarr (4K) Movie Editor to bulk-select existing 4K titles
+2. Assign correct root folder: `/data/media/movies/4k/`
+3. Trigger library rescan in Radarr (4K)
+4. Existing files re-pathed and monitoring assigned
+5. **No re-download required** - files already in correct location
+
+<Accordion title="Troubleshooting ARR Stack">
+
+**Hardlinks not working:**
+1. Verify both downloads and media are on same share: `df -h /data/downloads /data/media`
+2. Check Unraid share settings: Downloads and media shares must have "Use cache: No"
+3. Verify ARR using "Hardlink" or "Move" not "Copy"
+4. Test manually: `ln /data/downloads/test.txt /data/media/test.txt`
+
+**Downloads not importing:**
+1. Check qBittorrent category matches ARR instance download folder
+2. Verify file permissions: Should be `2000:2000`
+3. Check ARR logs for import errors
+4. Verify NFS mount is healthy: `mount | grep /data`
+
+**VPN not working:**
+1. Check Gluetun logs: `docker logs gluetun`
+2. Verify public IP: `docker exec qbittorrent curl ifconfig.me`
+3. Should show ProtonVPN IP, not residential
+4. Check port forwarding status in qBittorrent settings
+
+**qBitrr not managing torrents:**
+1. Verify ARR API keys in qBitrr config
+2. Check qBitrr web UI for connection status
+3. Ensure categories in qBittorrent match qBitrr config
+4. Review qBitrr logs for errors
+
+</Accordion>

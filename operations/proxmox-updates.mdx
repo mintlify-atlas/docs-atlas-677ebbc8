@@ -1,0 +1,491 @@
+---
+title: Proxmox Updates
+description: Safely updating Proxmox VE nodes and avoiding common pitfalls
+---
+
+## Update Strategy
+
+Proxmox VE receives regular updates including security patches, bug fixes, and feature releases. This guide ensures updates are applied safely without disrupting production services.
+
+**Update Schedule**:
+- Security patches: Apply within 7 days of release
+- Minor updates: Monthly maintenance window
+- Major version upgrades (e.g., 8.x → 9.x): Planned maintenance with testing
+
+<Warning>
+**Never update both Proxmox nodes simultaneously**. Always update one node, verify stability, then update the second node. This ensures at least one node remains available if issues arise.
+</Warning>
+
+---
+
+## Pre-Update Checklist
+
+<Steps>
+  <Step title="Review Proxmox Changelog">
+    Check official Proxmox release notes:
+    
+    `https://pve.proxmox.com/wiki/Roadmap`
+    
+    Look for:
+    - Breaking changes
+    - Known issues
+    - Recommended procedures
+  </Step>
+
+  <Step title="Verify Backups are Current">
+    **PBS Dashboard** (`https://192.168.30.12:8007`):
+    
+    - Last successful backup < 24 hours old
+    - All critical VMs backed up:
+      - `docker-prod-01`
+      - `auth-prod-01`
+      - `immich-prod-01`
+      - `pbs-prod-01`
+      - `dns-prod-01` and `dns-prod-02` (LXCs)
+  </Step>
+
+  <Step title="Check Cluster Health">
+    Proxmox UI → **Datacenter → Cluster**
+    
+    Verify:
+    - Both nodes show green status
+    - Quorum is healthy (2 nodes + QDevice = 3 votes)
+    - No split-brain warnings
+  </Step>
+
+  <Step title="Review Active VMs and Resource Usage">
+    **Datacenter → Summary**
+    
+    - Note which VMs are running on each node
+    - Check if any VMs can be temporarily migrated or shut down
+    - Verify no resource-intensive tasks running (PBS backups, large file transfers)
+  </Step>
+
+  <Step title="Notify Users (If Applicable)">
+    If updating during production hours:
+    
+    - Post notification in shared communication channel (Discord, etc.)
+    - Estimate downtime window (typically 15-30 minutes per node)
+  </Step>
+</Steps>
+
+---
+
+## Updating Proxmox (Standard Process)
+
+### Update pve-prod-02 First (Secondary Node)
+
+**Why secondary first?**: `pve-prod-02` runs fewer critical services (PBS + dns-prod-02). If update causes issues, primary services remain unaffected.
+
+<Steps>
+  <Step title="SSH to pve-prod-02">
+    ```bash
+    ssh root@192.168.10.12
+    ```
+  </Step>
+
+  <Step title="Update Package Lists">
+    ```bash
+    apt update
+    ```
+    
+    Review output for any repository errors or warnings.
+  </Step>
+
+  <Step title="Check Available Updates">
+    ```bash
+    apt list --upgradable
+    ```
+    
+    Review the list. Look for:
+    - `pve-manager` (Proxmox core)
+    - `proxmox-ve` (meta-package)
+    - Kernel updates (`pve-kernel-*`)
+  </Step>
+
+  <Step title="Perform Update">
+    ```bash
+    apt dist-upgrade -y
+    ```
+    
+    This updates all packages including kernel and Proxmox components.
+    
+    <Warning>
+    **Use `dist-upgrade` not `upgrade`**. `dist-upgrade` properly handles dependency changes required by Proxmox updates.
+    </Warning>
+  </Step>
+
+  <Step title="Review Update Output">
+    Watch for:
+    - Kernel installation messages
+    - Service restart prompts
+    - Any error messages (rare but possible)
+  </Step>
+
+  <Step title="Reboot Node">
+    If kernel was updated (check output above):
+    
+    ```bash
+    reboot
+    ```
+    
+    If only userspace packages updated:
+    
+    ```bash
+    systemctl restart pvedaemon pveproxy pvestatd
+    ```
+    
+    **Recommendation**: Reboot anyway to ensure clean state.
+  </Step>
+
+  <Step title="Verify Node After Reboot">
+    Wait 2-3 minutes for boot, then:
+    
+    - Proxmox UI → Check `pve-prod-02` shows green status
+    - SSH back in: `ssh root@192.168.10.12`
+    - Check kernel version: `uname -r`
+    - Verify VMs auto-started: `pct list` and `qm list`
+  </Step>
+
+  <Step title="Test Critical Services">
+    - **PBS**: Access `https://192.168.30.12:8007` — verify login works
+    - **dns-prod-02**: `ping 192.168.30.15` — verify LXC is up
+    - **Cluster**: Proxmox UI → **Datacenter → Cluster** — verify both nodes visible
+  </Step>
+</Steps>
+
+### Update pve-prod-01 (Primary Node)
+
+<Warning>
+**Wait at least 24 hours** after updating `pve-prod-02` before proceeding with `pve-prod-01`. This allows time to catch any delayed issues from the first update.
+</Warning>
+
+<Steps>
+  <Step title="Review pve-prod-02 Stability">
+    Confirm no issues from previous update:
+    - Check Proxmox logs: **pve-prod-02 → System → Syslog**
+    - Verify PBS backups completed successfully overnight
+    - No unexpected reboots or service failures
+  </Step>
+
+  <Step title="Optional: Migrate Critical VMs">
+    If you want zero downtime for critical services:
+    
+    **Proxmox UI → [Select VM] → Migrate**
+    
+    Migrate `docker-prod-01` to `pve-prod-02` temporarily.
+    
+    <Warning>
+    **Migration limitations**: VMs using local storage (not NFS) cannot live-migrate. `docker-prod-01` uses local disk for appdata — migration requires shutdown.
+    
+    For true zero-downtime, skip migration and accept brief service interruption during reboot.
+    </Warning>
+  </Step>
+
+  <Step title="Update pve-prod-01">
+    Repeat same process as pve-prod-02:
+    
+    ```bash
+    ssh root@192.168.10.11
+    apt update
+    apt list --upgradable
+    apt dist-upgrade -y
+    reboot
+    ```
+  </Step>
+
+  <Step title="Verify Node After Reboot">
+    - Check `pve-prod-01` status in cluster
+    - Verify all VMs/LXCs auto-started
+    - Test service access via Traefik (`https://homarr.giohosted.com`)
+  </Step>
+
+  <Step title="Migrate VMs Back (If Migrated)">
+    If you migrated `docker-prod-01` earlier, migrate back to `pve-prod-01`.
+  </Step>
+</Steps>
+
+---
+
+## Post-Update Verification
+
+<Steps>
+  <Step title="Check Proxmox Version">
+    Proxmox UI → **Datacenter → Summary**
+    
+    Verify both nodes show identical versions:
+    - Proxmox VE: `X.Y-Z`
+    - Kernel: `X.Y.Z-pve`
+  </Step>
+
+  <Step title="Verify Cluster Quorum">
+    **Datacenter → Cluster**
+    
+    Expected votes: 3 (node1 + node2 + QDevice on Pi)
+    
+    If quorum is broken:
+    ```bash
+    pvecm status  # Check cluster status
+    systemctl status corosync  # Verify Corosync running
+    ```
+  </Step>
+
+  <Step title="Run PBS Backup Manually">
+    Test that backups still work post-update:
+    
+    **Datacenter → Backup → [Select Job] → Run Now**
+    
+    Verify backup completes without errors.
+  </Step>
+
+  <Step title="Check VM Performance">
+    Monitor for 24-48 hours:
+    - Beszel metrics for CPU/RAM usage anomalies
+    - Service response times in Uptime Kuma
+    - Docker container logs for errors
+  </Step>
+
+  <Step title="Update Documentation">
+    Record update in homelab-docs:
+    
+    - Date updated
+    - Version before → after
+    - Any issues encountered
+    - Downtime duration
+  </Step>
+</Steps>
+
+---
+
+## Major Version Upgrades (e.g., Proxmox 8.x → 9.x)
+
+Major version upgrades require additional planning.
+
+<Steps>
+  <Step title="Review Official Upgrade Guide">
+    Proxmox publishes detailed upgrade guides:
+    
+    `https://pve.proxmox.com/wiki/Upgrade_from_X.Y_to_Z.0`
+    
+    Read completely before proceeding.
+  </Step>
+
+  <Step title="Run pve8to9 Checklist Tool">
+    Proxmox provides pre-upgrade checkers:
+    
+    ```bash
+    pve8to9 --full
+    ```
+    
+    Review output for blockers or warnings.
+  </Step>
+
+  <Step title="Snapshot Critical VMs">
+    Before starting upgrade:
+    
+    **Proxmox UI → [Select VM] → Snapshots → Take Snapshot**
+    
+    - `docker-prod-01-pre-upgrade`
+    - `auth-prod-01-pre-upgrade`
+    - `immich-prod-01-pre-upgrade`
+  </Step>
+
+  <Step title="Update Sources List">
+    ```bash
+    sed -i 's/bullseye/bookworm/g' /etc/apt/sources.list
+    sed -i 's/bullseye/bookworm/g' /etc/apt/sources.list.d/*.list
+    ```
+    
+    Or manually edit and replace repository URLs per official guide.
+  </Step>
+
+  <Step title="Perform Upgrade">
+    ```bash
+    apt update
+    apt dist-upgrade
+    ```
+    
+    This may take 30-60 minutes. Do not interrupt.
+  </Step>
+
+  <Step title="Reboot and Verify">
+    ```bash
+    reboot
+    ```
+    
+    After reboot:
+    - Check Proxmox web UI loads
+    - Verify version in **Datacenter → Summary**
+    - Test VM start/stop functionality
+  </Step>
+</Steps>
+
+<Warning>
+**Major upgrades should be tested in a lab environment first** if possible. Consider building a test Proxmox VM to simulate the upgrade before applying to production.
+</Warning>
+
+---
+
+## Troubleshooting Update Issues
+
+### Issue: Held Packages Prevent Update
+
+**Symptom**:
+```
+The following packages have been kept back:
+  pve-kernel-6.x.x-x-pve
+```
+
+**Fix**:
+```bash
+apt install pve-kernel-6.x.x-x-pve  # Explicitly install held kernel
+apt dist-upgrade
+```
+
+### Issue: Repository Errors (No Subscription)
+
+**Symptom**:
+```
+E: Failed to fetch https://enterprise.proxmox.com/...
+```
+
+**Fix**: Disable enterprise repo, enable no-subscription repo
+
+```bash
+# Disable enterprise repo
+echo "#deb https://enterprise.proxmox.com/debian/pve bullseye pve-enterprise" > /etc/apt/sources.list.d/pve-enterprise.list
+
+# Enable no-subscription repo
+echo "deb http://download.proxmox.com/debian/pve bullseye pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+
+apt update
+```
+
+### Issue: Cluster Split-Brain After Reboot
+
+**Symptom**: Nodes show as offline in each other's UI, but both are actually running.
+
+**Fix**:
+
+```bash
+# On each node, check Corosync status
+systemctl status corosync
+
+# Restart Corosync and cluster services
+systemctl restart corosync
+systemctl restart pve-cluster
+
+# Check quorum
+pvecm status
+```
+
+If QDevice is unreachable:
+```bash
+# On pi-prod-01, restart QDevice
+systemctl restart corosync-qdevice
+```
+
+### Issue: VMs Don't Auto-Start After Reboot
+
+**Fix**:
+
+Check VM config for auto-start:
+
+```bash
+qm config <VMID> | grep onboot
+```
+
+Enable auto-start:
+
+```bash
+qm set <VMID> --onboot 1
+```
+
+### Issue: Web UI Unreachable After Update
+
+**Check**:
+
+```bash
+# Verify pveproxy is running
+systemctl status pveproxy
+
+# Restart if needed
+systemctl restart pveproxy pvedaemon
+
+# Check firewall
+iptables -L -n | grep 8006
+```
+
+---
+
+## Emergency Rollback
+
+If an update causes critical issues:
+
+<Steps>
+  <Step title="Boot Previous Kernel">
+    At GRUB boot menu:
+    
+    - Select "Advanced options for Proxmox VE"
+    - Choose previous kernel version
+  </Step>
+
+  <Step title="Hold Problematic Packages">
+    ```bash
+    apt-mark hold pve-manager proxmox-ve pve-kernel-*
+    ```
+    
+    This prevents automatic updates until issue is resolved.
+  </Step>
+
+  <Step title="Restore from PBS Snapshot (Worst Case)">
+    If node is completely broken:
+    
+    - Boot from Proxmox installation USB
+    - Install Proxmox fresh on new storage
+    - Restore VMs from PBS on pve-prod-02
+  </Step>
+</Steps>
+
+---
+
+## Update Automation (Optional)
+
+For automated security updates only (not major upgrades):
+
+```bash
+# Install unattended-upgrades
+apt install unattended-upgrades
+
+# Configure to only install security updates
+dpkg-reconfigure -plow unattended-upgrades
+```
+
+Edit `/etc/apt/apt.conf.d/50unattended-upgrades`:
+
+```
+Unattended-Upgrade::Origins-Pattern {
+  "origin=Debian,codename=${distro_codename},label=Debian-Security";
+};
+
+Unattended-Upgrade::Automatic-Reboot "false";  // Never auto-reboot
+```
+
+<Warning>
+**Not recommended for homelab**: Auto-updates can break configurations. Manual updates with testing are safer for production services.
+</Warning>
+
+---
+
+## Update Maintenance Schedule
+
+**Monthly** (First Sunday, 02:00-06:00):
+- Update `pve-prod-02`
+- Wait 7 days, then update `pve-prod-01`
+
+**Immediately** (As Released):
+- Critical security patches (review CVE severity)
+
+**Planned Maintenance** (Twice Yearly):
+- Major version upgrades (e.g., Proxmox 8.x → 9.x)
+- Debian base OS upgrades (e.g., Bullseye → Bookworm)

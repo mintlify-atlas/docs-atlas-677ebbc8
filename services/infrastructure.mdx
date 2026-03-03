@@ -1,0 +1,324 @@
+---
+title: Infrastructure Services
+description: Core infrastructure services - reverse proxy, authentication, DNS, and remote access
+---
+
+## Overview
+
+Infrastructure services provide the foundation for all other services in the homelab, handling routing, authentication, DNS resolution, and secure remote access.
+
+<CardGroup cols={2}>
+  <Card title="Traefik" icon="route">
+    Reverse proxy and TLS termination
+  </Card>
+  <Card title="Authentik" icon="shield-halved">
+    Identity provider and SSO
+  </Card>
+  <Card title="AdGuard Home" icon="shield">
+    DNS resolver and ad-blocking
+  </Card>
+  <Card title="Cloudflare Tunnel" icon="cloud">
+    Secure external access without port forwarding
+  </Card>
+</CardGroup>
+
+## Traefik
+
+**Replaces:** Nginx Proxy Manager (NPM) from v2
+
+**Location:** docker-prod-01 (192.168.30.11)
+
+**Purpose:** 
+- Reverse proxy for all internal services
+- Automatic TLS termination with wildcard certificate
+- Label-based routing configuration
+- Familiarity for future k3s ingress (Traefik is k3s default)
+
+### Configuration
+
+**Wildcard certificate:**
+- Domain: `*.giohosted.com`
+- Challenge: Cloudflare DNS-01
+- Single certificate covers all internal services
+
+**Routing method:**
+- Docker label-based configuration
+- No separate config files per service
+- Dynamic service discovery
+
+**Example Docker labels:**
+```yaml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.sonarr.rule=Host(`sonarr.giohosted.com`)"
+  - "traefik.http.routers.sonarr.entrypoints=websecure"
+  - "traefik.http.routers.sonarr.tls.certresolver=cloudflare"
+  - "traefik.http.services.sonarr.loadbalancer.server.port=8989"
+```
+
+**Access:**
+- Dashboard: `https://traefik.giohosted.com`
+- Configuration: `/opt/stacks/traefik/`
+- Static config: `traefik.yml`
+- Dynamic config: `config/`
+
+### Migration from NPM
+
+During Phase 4 migration, NPM continues running in parallel. Cutover is performed by changing AdGuard DNS rewrite target from NPM IP to Traefik IP, enabling instant rollback if needed.
+
+<Note>
+Traefik dashboard should be protected with middleware for authentication or restricted to internal networks only.
+</Note>
+
+---
+
+## Authentik
+
+**Location:** auth-prod-01 (192.168.30.13) - Dedicated VM
+
+**Purpose:**
+- Single identity provider (IdP) for entire homelab
+- OpenID Connect (OIDC) and OAuth2 support
+- Multi-factor authentication (MFA) enforcement
+- Cloudflare Access integration
+
+### Why Dedicated VM?
+
+Authentik was moved from LXC to dedicated VM due to:
+- Official Proxmox community script removed in May 2025
+- Frequent breakage in LXC environment
+- 14GB RAM requirement during build
+- VM provides stable, supported deployment
+
+### Stack Components
+
+```yaml
+services:
+  - authentik-server   # Main application
+  - authentik-worker   # Background tasks
+  - postgresql         # Database
+  - redis              # Cache and message broker
+```
+
+### SSO-Enabled Services
+
+| Service | Method | Notes |
+|---------|--------|-------|
+| Proxmox (both nodes) | OIDC | Administrative access |
+| Audiobookshelf | OIDC | Requires sub unlink fix |
+| Calibre-Web-Automated | OAuth2 | Manual user linking required |
+| Beszel | OIDC | Requires `email_verified: true` custom scope |
+| Synology DSM | OIDC | Local admin retained as break-glass |
+| Homarr | OIDC | Dashboard access |
+| Immich | OIDC | Photo library access |
+
+**Services intentionally without SSO:**
+- ARR stack (Sonarr, Radarr, Prowlarr, Bazarr) - LAN-only, low risk
+- Uptime Kuma - LAN-only
+- qBittorrent - Behind VPN, LAN-only
+
+### Identity Model
+
+**Groups:**
+- `admins` - Full administrative access
+- `users` - Standard service access
+- `services` - Service accounts
+
+**MFA:**
+- Enforced for all admin group members
+- Optional but recommended for users
+- TOTP (authenticator app) supported
+
+### External Access
+
+**URL:** `auth.giohosted.com`
+
+<Warning>
+Authentik must NOT be behind Cloudflare Access. It serves as the authentication provider for Cloudflare Access and cannot authenticate itself.
+</Warning>
+
+**Access:**
+- Admin interface: `https://auth.giohosted.com/if/admin/`
+- User portal: `https://auth.giohosted.com/if/user/`
+- Configuration: `/opt/stacks/auth/` on auth-prod-01
+
+---
+
+## AdGuard Home
+
+**Deployment:** Two LXC containers for high availability
+- **dns-prod-01** (192.168.30.10) - Primary, on pve-prod-01
+- **dns-prod-02** (192.168.30.15) - Secondary, on pve-prod-02
+
+**Purpose:**
+- DNS resolution for all network devices
+- Ad-blocking and tracker filtering
+- Split-horizon DNS for internal services
+- DNS survives either Proxmox node failure
+
+### Split-Horizon DNS
+
+**Internal resolution:**
+```
+*.giohosted.com → 192.168.30.11 (Traefik)
+```
+
+**External resolution:**
+- Cloudflare manages public DNS
+- CNAMEs point to Cloudflare Tunnel endpoints
+- Same FQDN works both internally and externally with valid TLS
+
+### DNS Rewrites
+
+Configured in AdGuard to resolve internal service hostnames:
+
+```
+sonarr.giohosted.com     → 192.168.30.11
+radarr.giohosted.com     → 192.168.30.11
+plex.giohosted.com       → 192.168.30.11
+audiobooks.giohosted.com → 192.168.30.11
+[all services]           → Traefik IP
+```
+
+### Synchronization
+
+**adguardhome-sync** keeps both instances in sync:
+- Runs as container on docker-prod-01
+- Replicates configuration from dns-prod-01 to dns-prod-02
+- DNS rewrites, filters, and settings stay consistent
+- Automatic sync on configuration changes
+
+**Access:**
+- Primary: `https://dns-prod-01.giohosted.com` or direct at `http://192.168.30.10`
+- Secondary: `https://dns-prod-02.giohosted.com` or direct at `http://192.168.30.15`
+
+### DHCP Configuration
+
+UDM-SE DHCP server configured to provide:
+- Primary DNS: 192.168.30.10 (dns-prod-01)
+- Secondary DNS: 192.168.30.15 (dns-prod-02)
+- Tertiary DNS: 1.1.1.1 (Cloudflare public DNS as fallback)
+
+<Tip>
+DNS high availability across two Proxmox nodes ensures DNS resolution continues even during maintenance or node failure.
+</Tip>
+
+---
+
+## Cloudflare Tunnel (cloudflared)
+
+**Location:** docker-prod-01
+
+**Purpose:**
+- Secure external access without port forwarding
+- Outbound-only connection to Cloudflare edge
+- Zero-trust access via Cloudflare Access policies
+
+### Exposed Services
+
+| Hostname | Service | Protection |
+|----------|---------|------------|
+| `audiobooks.giohosted.com` | Audiobookshelf | Cloudflare Access + Authentik OIDC |
+| `books.giohosted.com` | Shelfmark | Cloudflare Access + Authentik OIDC |
+| `request.giohosted.com` | Seerr | Cloudflare Access |
+| `auth.giohosted.com` | Authentik | Tunnel only (no CF Access) |
+
+### Configuration
+
+Tunnel configured via Cloudflare Zero Trust dashboard:
+
+1. **Tunnel creation** in Zero Trust → Access → Tunnels
+2. **Public hostname routes** map external hostnames to internal services
+3. **cloudflared container** maintains persistent connection to Cloudflare edge
+
+**Internal routing:**
+```
+audiobooks.giohosted.com → https://192.168.30.11 (Traefik)
+books.giohosted.com      → https://192.168.30.11 (Traefik)
+request.giohosted.com    → https://192.168.30.11 (Traefik)
+auth.giohosted.com       → https://192.168.30.13 (Authentik)
+```
+
+### Cloudflare Access Policies
+
+Entitlement-based access control:
+- **Admins group:** Full access to all services
+- **Users group:** Access to Audiobookshelf, Shelfmark, Seerr
+- **MFA required** for admin access
+
+**Access:**
+- Configuration: `/opt/stacks/cloudflared/compose.yaml`
+- Tunnel token: Stored in `.env` file (gitignored)
+
+### Why Not Plex?
+
+<Warning>
+Cloudflare ToS prohibits video streaming through tunnels. Plex uses direct port forwarding on port 32400 instead.
+</Warning>
+
+---
+
+## Supporting Services
+
+### Homarr
+
+**Operations dashboard:**
+- Unified view of all services
+- Status monitoring
+- Quick links to service UIs
+- Custom widgets for common tasks
+
+**Access:** `https://homarr.giohosted.com`
+
+### Dockman
+
+**Docker Compose management:**
+- Web UI for managing compose stacks
+- Restart individual containers without stack disruption
+- View logs and resource usage
+- More convenient than SSH for routine operations
+
+**Access:** `https://dockman.giohosted.com`
+
+**Key advantage:** In Kubernetes future, Dockman remains for Docker services while Lens/Headlamp handles k8s workloads.
+
+---
+
+## Network Architecture
+
+### VLAN Placement
+
+All infrastructure services run on **VLAN 30 (Services)** - 192.168.30.0/24
+
+### Firewall Rules
+
+| Source | Destination | Ports | Action | Purpose |
+|--------|-------------|-------|--------|----------|
+| Trusted (VLAN 20) | Services (VLAN 30) | Any | ALLOW | Users access services |
+| Services (VLAN 30) | Services (VLAN 30) | Any | ALLOW | Inter-service communication |
+| Services (VLAN 30) | Management (VLAN 10) | - | DENY | Services cannot access infrastructure |
+| Services (VLAN 30) | Internet | Any | ALLOW | Outbound for updates and API calls |
+
+### DNS Flow
+
+1. Client requests `sonarr.giohosted.com`
+2. AdGuard Home (dns-prod-01 or dns-prod-02) rewrites to `192.168.30.11`
+3. Client connects to Traefik on docker-prod-01
+4. Traefik routes to appropriate container based on hostname
+5. Response returned with valid TLS certificate
+
+<Accordion title="Troubleshooting DNS Issues">
+
+**Services not resolving:**
+1. Check AdGuard Home is running: `ssh dns-prod-01` → `systemctl status adguardhome`
+2. Verify DNS rewrites configured in AdGuard web UI
+3. Check client DNS settings point to 192.168.30.10 and 192.168.30.15
+4. Test with `nslookup sonarr.giohosted.com 192.168.30.10`
+
+**Sync not working:**
+1. Check adguardhome-sync container logs: `docker logs adguardhome-sync`
+2. Verify API credentials in `.env` file
+3. Ensure both AdGuard instances are accessible
+4. Manual sync: Restart adguardhome-sync container
+
+</Accordion>

@@ -1,0 +1,402 @@
+---
+title: Drive Replacement
+description: Procedures for replacing failed drives in the Unraid array
+---
+
+## Overview
+
+Unraid's parity-protected array allows for single-drive replacement without data loss. This guide covers:
+
+- Identifying failed drives
+- Pre-replacement preparation
+- Physical drive replacement
+- Array rebuild process
+- Post-rebuild verification
+
+<Warning>
+**Do not replace multiple drives simultaneously**. Unraid can recover from a single drive failure with dual parity, but replacing multiple data drives at once requires careful planning. Always replace and rebuild one drive at a time.
+</Warning>
+
+---
+
+## Identifying Drive Failures
+
+### Dashboard Indicators
+
+Unraid Main Dashboard will show:
+- Red "X" icon on failed drive
+- Array status: "Degraded" (yellow warning)
+- Notification in system log
+
+### SMART Data Review
+
+<Steps>
+  <Step title="Access SMART Info">
+    Unraid UI → **Main → [Select Drive] → SMART Info**
+  </Step>
+
+  <Step title="Check Critical Attributes">
+    **Red flags** (immediate replacement required):
+    - `Reallocated Sectors Count`: > 0
+    - `Current Pending Sector Count`: > 0
+    - `Offline Uncorrectable Sectors`: > 0
+    - `SMART overall-health self-assessment`: `FAILED`
+    
+    **Yellow flags** (monitor closely, plan replacement):
+    - Drive temperature: > 55°C sustained
+    - Power-On Hours: > 40,000 hours (5+ years)
+    - Spin Retry Count: > 0
+  </Step>
+
+  <Step title="Document Drive Info">
+    Record before replacement:
+    - Drive serial number (from SMART or physical label)
+    - Drive position (slot number in array)
+    - Drive role (data disk, parity1, parity2)
+    - Filesystem type (XFS, BTRFS)
+  </Step>
+</Steps>
+
+---
+
+## Pre-Replacement Checklist
+
+<Steps>
+  <Step title="Verify Parity is Valid">
+    **Critical**: Do not replace a drive if parity is invalid.
+    
+    Unraid UI → **Main → Array Operation**
+    
+    Parity status should show:
+    - Parity is valid (green checkmark)
+    - No sync/check in progress
+    
+    If parity is invalid:
+    1. Run parity check first: **Main → Parity Check → Start**
+    2. Wait for completion (may take 8-24 hours)
+    3. Review results — if errors found, investigate before proceeding
+  </Step>
+
+  <Step title="Stop All Docker Containers">
+    Minimize disk activity during replacement.
+    
+    **Docker → [Select All] → Stop**
+  </Step>
+
+  <Step title="Stop Array (If Drive is Still Detected)">
+    Unraid UI → **Main → Array Operation → Stop**
+    
+    <Warning>
+    **Only stop the array** if the drive is still detected by Unraid. If the drive has completely failed and disappeared, proceed directly to physical replacement.
+    </Warning>
+  </Step>
+
+  <Step title="Prepare Replacement Drive">
+    **Requirements**:
+    - Replacement drive must be **same size or larger** than failed drive
+    - CMR drive (not SMR) for array drives
+    - NAS-rated (WD Red, IronWolf, etc.)
+    
+    **Do NOT pre-format** — Unraid handles formatting during rebuild.
+  </Step>
+</Steps>
+
+---
+
+## Physical Drive Replacement
+
+<Warning>
+**Shutdown the server** before opening the chassis unless hot-swap bays are confirmed working. The 4U chassis used in this build may support hot-swap, but safe shutdown is recommended for first-time replacements.
+</Warning>
+
+<Steps>
+  <Step title="Power Down Server">
+    Unraid UI → **Main → Shutdown**
+    
+    Wait for complete shutdown (fans stop, activity lights off).
+  </Step>
+
+  <Step title="Identify Failed Drive Physically">
+    Match drive serial number from SMART data to physical label.
+    
+    **Location reference**:
+    - 4U 12-bay chassis: drives are numbered left-to-right, top-to-bottom
+    - Unraid assigns `sdX` device IDs — cross-reference in **Tools → System Devices**
+  </Step>
+
+  <Step title="Remove Failed Drive">
+    - Pull drive tray release latch
+    - Slide tray out gently
+    - Unscrew drive from tray (4 screws)
+    - Keep failed drive for RMA if under warranty
+  </Step>
+
+  <Step title="Install Replacement Drive">
+    - Mount new drive in tray (4 screws, same orientation)
+    - Slide tray back into same slot
+    - Ensure tray locks securely
+  </Step>
+
+  <Step title="Power On Server">
+    Press power button and wait for POST.
+  </Step>
+</Steps>
+
+---
+
+## Array Rebuild Process
+
+<Steps>
+  <Step title="Boot Unraid and Review Main Page">
+    Unraid UI → **Main**
+    
+    New drive should appear as "Unassigned Device" or "New Device".
+  </Step>
+
+  <Step title="Assign Replacement Drive">
+    **Main → [Failed Drive Slot] → Device → [Select New Drive]**
+    
+    Example:
+    - If `Disk 4` failed, select the new drive from dropdown under `Disk 4`
+    
+    <Warning>
+    **Verify you selected the correct slot**. Assigning the wrong drive will wipe it.
+    </Warning>
+  </Step>
+
+  <Step title="Apply Configuration">
+    Click **Apply** at the bottom of the Main page.
+    
+    Unraid will prompt:
+    > "Are you sure you want to start the array? This will rebuild the disabled disk."
+    
+    Confirm and click **Start**.
+  </Step>
+
+  <Step title="Monitor Rebuild Progress">
+    **Main → Array Operation**
+    
+    Shows:
+    - Rebuild progress percentage
+    - Estimated time remaining
+    - Current speed (MB/s)
+    
+    **Expected duration**:
+    - 4TB drive: 6-10 hours
+    - 12TB drive: 18-30 hours
+    
+    Rebuild runs in background — server remains usable but slower.
+  </Step>
+
+  <Step title="Do Not Interrupt Rebuild">
+    <Warning>
+    **Do not stop the array or power off during rebuild**. Interruption forces restart from beginning.
+    </Warning>
+    
+    Safe to:
+    - Access shares (read/write)
+    - Start Docker containers (after rebuild > 10%)
+    - Use Plex (performance may be degraded)
+    
+    Avoid:
+    - Stopping array
+    - Rebooting server
+    - Replacing additional drives
+  </Step>
+</Steps>
+
+---
+
+## Post-Rebuild Verification
+
+<Steps>
+  <Step title="Verify Rebuild Completed">
+    **Main → Array Operation**
+    
+    Status should show:
+    - "Reconstruct finished" (green)
+    - Array status: Normal (green checkmark)
+    - No disabled drives
+  </Step>
+
+  <Step title="Run Parity Check">
+    **Main → Parity Check → Correcting → Start**
+    
+    This verifies parity is consistent after rebuild.
+    
+    Expected result: 0 errors
+    
+    If errors are found:
+    - Review Unraid logs: **Tools → System Log**
+    - Check SMART data on all drives
+    - Consider running a second parity check
+  </Step>
+
+  <Step title="Check SMART Data on New Drive">
+    **Main → [New Drive] → SMART Info**
+    
+    Verify:
+    - `SMART overall-health`: `PASSED`
+    - `Reallocated Sectors`: 0
+    - Temperature: < 50°C
+  </Step>
+
+  <Step title="Update Drive Inventory">
+    Document replacement in homelab-docs repo:
+    
+    - Date replaced
+    - Old drive serial number
+    - New drive serial number and model
+    - RMA status (if applicable)
+  </Step>
+
+  <Step title="Resume Normal Operations">
+    - Restart Docker containers: **Docker → [Select All] → Start**
+    - Verify media shares accessible
+    - Test Plex playback
+    - Confirm backup jobs resume (check Healthchecks.io)
+  </Step>
+</Steps>
+
+---
+
+## Special Cases
+
+### Replacing a Parity Drive
+
+**Simpler than data drive replacement** — no rebuild required if parity drive fails.
+
+<Steps>
+  <Step title="Stop Array and Replace Drive">
+    Same physical replacement process as data drive.
+  </Step>
+
+  <Step title="Assign New Parity Drive">
+    **Main → Parity → [Select New Drive]**
+  </Step>
+
+  <Step title="Start Array - Parity Will Sync">
+    Unraid will **build new parity** from scratch using all data drives.
+    
+    This takes just as long as a rebuild (18-30 hours for 12TB array).
+  </Step>
+
+  <Step title="Verify Parity Sync Completes">
+    **Main → Array Operation** → "Parity sync finished"
+  </Step>
+</Steps>
+
+### Dual Drive Failure (Critical)
+
+<Warning>
+**Data loss scenario**: If two data drives fail simultaneously and you only have dual parity, one drive's data is unrecoverable.
+</Warning>
+
+If dual parity is intact:
+1. Replace drives one at a time
+2. Rebuild first drive completely
+3. Then replace and rebuild second drive
+
+If parity is also compromised:
+- **Stop immediately** — do not start array
+- Consult Unraid forums or professional data recovery
+- Consider restoring from Synology ABB (Tier 3 backup)
+
+### Upgrading Drive Size
+
+Replace smaller drive with larger drive to expand array capacity.
+
+<Steps>
+  <Step title="Replace Drive Normally">
+    Follow standard replacement procedure.
+  </Step>
+
+  <Step title="Rebuild Completes at Original Size">
+    Unraid will only use the same capacity as the old drive initially.
+  </Step>
+
+  <Step title="Expand Array (Optional)">
+    After rebuild completes:
+    
+    **Tools → New Config → Retain All Drives → Apply**
+    
+    Start array — Unraid will recognize the larger capacity and expand.
+  </Step>
+</Steps>
+
+---
+
+## Prevention & Monitoring
+
+### Schedule Regular Parity Checks
+
+**Recommended**: Monthly parity check (non-correcting)
+
+**Settings → Scheduler → Parity Check**
+- Day of month: `1` (first of month)
+- Time: `02:00` (overnight)
+- Type: `Non-correcting` (read-only check)
+
+### Monitor SMART Weekly
+
+Add to weekly operations checklist:
+- Review SMART data for all drives
+- Check for temperature spikes
+- Note Power-On Hours for aging drives
+
+### Replace Drives Proactively
+
+Don't wait for failure. Replace if:
+- Reallocated sectors appear (even if count is low)
+- Drive is 5+ years old (> 40,000 hours)
+- Drive has been through 1+ rebuilds already (stress accumulates)
+
+### Maintain Hot Spares
+
+**Current spares**:
+- 1x WD Red Plus 4TB (for ZFS mirror pool)
+- 2x Seagate IronWolf 6TB (for array expansion or emergency replacement)
+
+**Before using a spare**: Run SMART extended test to verify health.
+
+---
+
+## Troubleshooting
+
+### Drive Not Detected After Replacement
+
+**Check**:
+- SATA cable seated firmly (both ends)
+- Power cable connected
+- Drive shows in BIOS/UEFI
+- Different SATA port if available
+
+### Rebuild Extremely Slow (< 50 MB/s)
+
+**Causes**:
+- Docker containers running heavy I/O
+- Plex transcoding active
+- Another parity check running
+
+**Fix**:
+- Stop Docker containers temporarily
+- Pause Plex activity
+- Check **Settings → Disk Settings → Tunable (md_write_method)** — should be `auto`
+
+### Parity Errors After Rebuild
+
+**Not necessarily a problem** — small number of errors (< 10) can occur during rebuild if array was accessed.
+
+**Action**:
+1. Run second correcting parity check
+2. If errors persist, review SMART on all drives
+3. Consider testing drives individually with badblocks
+
+### New Drive Fails SMART Immediately
+
+**DOA (Dead on Arrival)** — return for RMA.
+
+**Before RMA**:
+- Test in different SATA port
+- Test with different cable
+- Document SMART output and serial number for RMA claim

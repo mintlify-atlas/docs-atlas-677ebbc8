@@ -1,0 +1,175 @@
+---
+title: "Phase 5 — Operational Hardening"
+description: "Validate backups, monitoring, and operational readiness"
+icon: "shield-check"
+---
+
+<Info>
+**Status:** Planned
+
+**Category:** Stabilization
+</Info>
+
+## Objective
+
+Tighten operations, validate all backup tiers, implement monitoring alerting, and document the final v3 state.
+
+## Entry Criteria
+
+<Check>
+  Phase 4 complete — all services running on v3 infrastructure
+</Check>
+
+## Tasks
+
+<Steps>
+  <Step title="Validate Backup Tier 0 (PBS)">
+    - Validate all PBS backup jobs
+    - Test restore of docker-prod-01 VM to confirm backups are valid
+    - Verify backup retention policy configured correctly
+  </Step>
+  
+  <Step title="Validate Backup Tier 1 (Docker Appdata)">
+    - Validate rsync backup script with mountpoint safety check and lockfile
+    - Validate Plex DB backup script with EXIT trap
+    - Test restore of appdata from NAS backup
+  </Step>
+  
+  <Step title="Validate Backup Tier 2 (NAS Snapshots)">
+    - Verify ZFS snapshots on backups + photos pool
+    - Test rollback to previous snapshot
+  </Step>
+  
+  <Step title="Validate Backup Tier 3 (Synology ABB)">
+    - Verify Synology ABB pulling from NAS correctly with read-only credentials
+    - Verify file counts match
+  </Step>
+  
+  <Step title="Verify Monitoring & Alerting">
+    - Verify all Healthchecks.io heartbeats are firing
+    - Test alert: manually miss a heartbeat, confirm notification received
+    - Verify Beszel showing all hosts
+    - Verify Uptime Kuma monitoring all critical services
+  </Step>
+  
+  <Step title="Evaluate Backblaze B2">
+    Evaluate Backblaze B2 for Immich photos + backups (Tier 4 cloud backup)
+  </Step>
+  
+  <Step title="Tighten Traefik Middleware">
+    Review and tighten Traefik middleware: rate limiting, security headers
+  </Step>
+  
+  <Step title="Audit Authentik">
+    - Verify all OIDC integrations
+    - Verify session policies
+    - Verify MFA enforcement for admins
+  </Step>
+  
+  <Step title="Document v3 Final State">
+    - Write master runbook
+    - Document all service configs
+    - Document all firewall rules
+    - Document all DNS rewrites
+  </Step>
+  
+  <Step title="VLAN Penetration Test">
+    Verify VLAN firewall rules with penetration test from IoT VLAN
+  </Step>
+</Steps>
+
+## Backup Tiers
+
+| Tier | What | Tool | Destination |
+|------|------|------|-------------|
+| Tier 0 | VM/LXC snapshots | Proxmox Backup Server (PBS) | pbs-prod-01 VM → ZFS mirror share on NAS |
+| Tier 1 | Docker appdata + stacks | Hardened rsync script + Healthchecks | NAS /backups share (ZFS mirror pool) |
+| Tier 1 | Plex database | Dedicated backup script (stop/backup/start) | NAS /backups/plex/db |
+| Tier 2 | NAS share snapshots | Unraid ZFS snapshot (backups + photos pool) | Local ZFS snapshots on NAS |
+| Tier 3 | Off-box cold copy | Synology ABB (pull-based, read-only creds) | Synology NAS — nightly |
+| Tier 4 | Cloud backup | Backblaze B2 (future) | Critical data offsite — Immich photos, backups |
+
+<Warning>
+**PBS Does Not Back Up Application Data**
+
+PBS backs up VM disk images only — not application data inside VMs. Application-level backups (Docker appdata, Plex DB) remain essential and run independently of PBS.
+</Warning>
+
+## Monitoring & Alerting
+
+<Accordion title="Beszel — Host/VM Metrics">
+- Beszel server runs on pi-prod-01
+- Agents on all hosts: pve-prod-01, pve-prod-02, nas-prod-01, docker-prod-01
+- Dashboards show CPU, RAM, disk, network for all hosts
+</Accordion>
+
+<Accordion title="Uptime Kuma — Service Uptime">
+- Uptime Kuma runs on pi-prod-01
+- Monitors all critical services with HTTP checks
+- Alerts via Discord on service down
+</Accordion>
+
+<Accordion title="Healthchecks.io — Backup Job Heartbeats">
+- Backup scripts ping Healthchecks.io on success
+- Alerts via Discord if heartbeat missed
+- Monitors: backup-docker.sh, backup-plex-db.sh, PBS backup jobs
+</Accordion>
+
+## Security Hardening
+
+<Steps>
+  <Step title="Traefik Security Headers">
+    - HSTS enabled
+    - X-Frame-Options: DENY
+    - X-Content-Type-Options: nosniff
+    - Referrer-Policy: strict-origin-when-cross-origin
+  </Step>
+  
+  <Step title="Traefik Rate Limiting">
+    - 100 requests per minute per IP for all services
+    - 10 requests per minute for auth endpoints
+  </Step>
+  
+  <Step title="Authentik MFA Enforcement">
+    - MFA required for all admin accounts
+    - TOTP or WebAuthn supported
+  </Step>
+  
+  <Step title="VLAN Firewall Audit">
+    - IoT VLAN cannot reach internal services
+    - Services VLAN cannot reach Management VLAN
+    - Services VLAN cannot initiate to Trusted VLAN
+  </Step>
+</Steps>
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="All backup tiers validated with test restores" icon="check">
+    - PBS restore tested
+    - Docker appdata restore tested
+    - Plex DB restore tested
+    - ZFS snapshot rollback tested
+    - Synology ABB verified pulling correctly
+  </Accordion>
+  
+  <Accordion title="All monitoring and alerting confirmed end-to-end" icon="bell">
+    - Beszel showing all hosts
+    - Uptime Kuma monitoring all services
+    - Healthchecks.io heartbeats firing
+    - Test alert sent and received
+  </Accordion>
+  
+  <Accordion title="v3 master runbook written and committed" icon="book">
+    - All service configs documented
+    - All firewall rules documented
+    - All DNS rewrites documented
+    - Restore procedures documented
+  </Accordion>
+</AccordionGroup>
+
+## Next Phase
+
+<Card title="Phase 6 — Kubernetes (k3s/Talos)" icon="cubes" href="/phases/phase-6-kubernetes">
+  Future k3s deployment — sandbox first, production later
+</Card>

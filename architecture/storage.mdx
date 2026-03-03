@@ -1,0 +1,313 @@
+---
+title: Storage Architecture
+description: Unraid configuration, pool layout, share structure, and data organization
+---
+
+## Storage Platform
+
+**Platform**: Unraid 7.2.4 (replaces TrueNAS SCALE from v2)
+
+**Rationale**: Hybrid ZFS + parity array model fits the data risk tolerance perfectly:
+- **ZFS** used where data integrity is non-negotiable (photos, backups)
+- **Parity array** used for recoverable bulk media where mixed drive sizes and expandability matter more than ZFS guarantees
+
+<Note>
+TrueNAS ran as a VM in v2 — a fragile design. v3 gives the NAS dedicated bare-metal hardware with proper HBA and 10GbE connectivity.
+</Note>
+
+---
+
+## Drive Inventory & Classification
+
+| Drive | Count | Type | Classification | Assignment |
+|-------|-------|------|----------------|------------|
+| WD Red Pro 12TB | 5 | CMR NAS | ✅ Production | 2x parity + 3x data (parity array) |
+| WD Red Plus 4TB | 5 | CMR NAS | ✅ Production | 2x ZFS mirror pool + 2x array expansion + 1x spare |
+| Seagate IronWolf 6TB | 2 | CMR NAS | ✅ Production | Hot spares / future expansion |
+| Seagate SkyHawk 6TB | 4 | Surveillance CMR | ⚠️ Non-NAS | Repurpose in Synology for cold backup only |
+| Seagate Barracuda 4TB | 1 | Desktop | ❌ Retire | Not suitable for always-on NAS duty |
+
+<Warning>
+**SkyHawk Drives**: Surveillance firmware — not appropriate for NAS parity array. Used only in Synology for cold backup storage.
+
+**Barracuda Drive**: Desktop drive not rated for 24/7 operation. Retired from service.
+</Warning>
+
+---
+
+## Unraid Pool Layout
+
+### Parity Array — Bulk Media & Downloads
+
+**Purpose**: Recoverable bulk media and active downloads. Mixed drive sizes supported.
+
+**Configuration**:
+- **Parity**: 2x WD Red Pro 12TB (dual parity)
+- **Data**: 3x WD Red Pro 12TB (~36TB usable)
+- **Filesystem**: XFS per-disk (Unraid default — NOT BTRFS for array)
+- **Expandable**: 2x WD Red Plus 4TB + 2x IronWolf 6TB available as additional data drives when needed
+
+**Shares on Parity Array**:
+- `media` — TV shows, movies, anime, books
+- `downloads` — All download categories (qBittorrent staging)
+- `appdata` — Docker/app config from NAS perspective
+- `isos` — Proxmox ISO images
+
+<Warning>
+**Dual Parity Requirement**: With 3+ data drives, dual parity is essential. Single parity means two simultaneous drive failures (one during a rebuild) kills the array. Dual parity tolerates two simultaneous failures.
+</Warning>
+
+### ZFS Mirror Pool — Precious Data
+
+**Purpose**: Irreplaceable data requiring ZFS integrity guarantees.
+
+**Configuration**:
+- **Pool**: 2x WD Red Plus 4TB in ZFS mirror (~4TB usable)
+- **Cold Spare**: 1x WD Red Plus 4TB
+- **Snapshots**: Enabled on both shares
+
+**Shares on ZFS Pool**:
+- `backups` — PBS backups, Docker appdata, Plex DB, Proxmox dumps
+- `photos` — Immich library (irreplaceable — ZFS protected)
+
+<Note>
+ZFS snapshots provide point-in-time recovery. Same data integrity guarantees TrueNAS had for these datasets in v2.
+</Note>
+
+### Cache Pool — Not Installed at Launch
+
+**Decision**: No NVMe cache pool at initial build.
+
+**Rationale**:
+- Downloads bypass cache entirely (hardlink requirement — see below)
+- Container appdata lives on docker-prod-01 local disk, not NAS NFS
+- Plex transcode temp points at local Unraid directory
+- No real workload justifies cache at launch
+
+**Future Addition** (if needed):
+- 2x 512GB NVMe
+- BTRFS RAID1 mirrored
+- Would handle only small random-write workloads — never downloads, never container appdata
+
+<Warning>
+**Cache Drives Must Always Be Mirrored**: A single cache SSD failure before the mover runs means data loss. Never run a single cache drive. Always mirror.
+</Warning>
+
+---
+
+## Hardlink Architecture
+
+### The Hardlink Requirement
+
+Downloads and media shares **MUST** be on the same Unraid pool/filesystem for hardlinks and atomic moves to work.
+
+**Why This Matters**:
+- qBittorrent downloads to `/data/downloads/`
+- ARR tools (Sonarr, Radarr) import to `/data/media/`
+- Import = hardlink or atomic move (instant, zero copy)
+- Original file stays in downloads for seeding
+- Media file appears in Plex library
+- One file, two directory entries, same inode
+
+<Warning>
+**Downloads Share Configuration**: Set "Use cache: No" in Unraid. Downloads write DIRECTLY to parity array. Never route downloads through cache while media lives on array — this breaks hardlinks and causes silent file duplication.
+</Warning>
+
+### Hardlink Validation
+
+Verify hardlinks are working:
+
+```bash
+stat /data/media/movies/Example\ Movie\ (2024)/Example.mkv
+stat /data/downloads/movies/Example.mkv
+```
+
+Both files should show:
+- Same inode number
+- Links: 2 (or higher)
+
+---
+
+## Share & Directory Layout
+
+### Unraid NAS Shares (/mnt/user/)
+
+| Share | Pool | NAS Path | Contents |
+|-------|------|----------|----------|
+| media | Parity Array | /mnt/user/media | All media — movies (1080p+4K), TV, anime, books |
+| downloads | Parity Array | /mnt/user/downloads | Active download staging for all categories |
+| photos | ZFS Mirror | /mnt/user/photos | Immich library (irreplaceable — ZFS protected) |
+| backups | ZFS Mirror | /mnt/user/backups | PBS backups, Docker appdata, Plex DB, Proxmox dumps |
+| appdata | Parity Array | /mnt/user/appdata | Docker/app config from NAS perspective |
+| isos | Parity Array | /mnt/user/isos | Proxmox ISO images |
+
+<Warning>
+`/mnt/user` is Unraid's internal path and cannot be renamed. This path is never seen by containers — the docker-host VM mounts the NFS export as `/data`. All compose files reference `/data` paths only.
+</Warning>
+
+### Docker Host — /data Mount Structure
+
+The NAS exports `/mnt/user` via NFS. The docker-host VM mounts this as `/data`. Everything below is logical folder organization within that single mount — one filesystem, hardlinks work everywhere.
+
+```
+/data/
+├── media/
+│   ├── movies/
+│   │   ├── 1080p/          # Radarr (1080p) library
+│   │   └── 4k/             # Radarr (4K) library
+│   ├── tv/                 # Sonarr (TV) library
+│   ├── anime/              # Sonarr (Anime) library
+│   └── books/
+│       ├── ebooks/         # CWA Calibre library (canonical state)
+│       └── audiobooks/     # ABS library — Shelfmark hardlinks here
+├── downloads/
+│   ├── movies/             # qBit movie download staging
+│   ├── tv/                 # qBit TV download staging
+│   ├── anime/              # qBit anime download staging
+│   └── books/
+│       ├── ebooks/
+│       │   ├── downloads/  # qBit seeds from here
+│       │   └── ingest/     # Shelfmark hardlinks here → CWA ingests
+│       └── audiobooks/
+│           └── downloads/  # qBit seeds → Shelfmark hardlinks to media/
+└── photos/                 # Immich library (ZFS mirror pool)
+```
+
+---
+
+## Ebook Hardlink Workflow
+
+v2 had a seeding breakage bug: CWA deleted the ingest file after import, killing the qBit torrent. v3 fixes this with hardlinks.
+
+| Step | Actor | Action |
+|------|-------|--------|
+| 1 | qBittorrent | Downloads ebook to `/data/downloads/books/ebooks/downloads/` — seeds from here permanently |
+| 2 | Shelfmark | Hardlinks completed file to `/data/downloads/books/ebooks/ingest/` |
+| 3 | CWA | Detects file in ingest/, imports to `/data/media/books/ebooks/`, deletes the hardlink in ingest/ |
+| 4 | qBittorrent | Original file in downloads/ is untouched — seeding continues uninterrupted |
+| 5 | qBitrr | After 14 days, qBitrr stops seeding per MAM policy |
+
+**Result**: CWA gets the file, Calibre library is updated, and the torrent continues seeding without intervention.
+
+---
+
+## UID/GID Strategy
+
+**Service UID/GID**: `2000:2000` (clean break from v2)
+
+**Human User (gio)**: `1000:1000`
+
+**Container Configuration**: All containers interacting with NFS/SMB mounts run as `PUID=2000 PGID=2000`
+
+**NAS Permissions**: Share permissions set to allow `2000:2000` read/write on all service shares
+
+<Note>
+Clean separation: No services run as root. No more gio ownership of datasets. Fresh NFS exports, fresh ownership.
+</Note>
+
+---
+
+## Network Connectivity
+
+### Primary Protocol: NFS
+
+Linux VM/container mounts use NFS v3 for performance.
+
+**NFS Exports** (configured in Unraid):
+- `/mnt/user/media` → exported as `/data/media` to docker-prod-01
+- `/mnt/user/downloads` → exported as `/data/downloads` to docker-prod-01  
+- `/mnt/user/photos` → exported as `/data/photos` to immich-prod-01
+- `/mnt/user/backups` → exported as `/data/backups` to pbs-prod-01
+
+### Secondary Protocol: SMB
+
+SMB available for Windows or macOS access if needed. Unraid exports both protocols natively — no extra configuration required.
+
+### 10GbE Storage Network
+
+**Dedicated Link**: 2M DAC cable from NAS X710 Port 1 → MS-A2 SFP+ Port 2
+
+**Purpose**: Keeps NFS storage traffic off the LAN switch. Full 10GbE bandwidth for VM/container NFS mounts.
+
+**Configuration**: Separate subnet, point-to-point link. Not on any VLAN.
+
+<Note>
+Storage traffic intentionally isolated. LAN switch handles VM/LXC control traffic. Storage link handles bulk data movement.
+</Note>
+
+---
+
+## Plex Deployment
+
+**Platform**: Unraid native Docker container (NOT on docker-prod-01)
+
+**Why on Unraid?**
+- i5-13400 QuickSync iGPU (Intel UHD 730) for hardware transcoding
+- Eliminates NFS hop — media files are local to the host doing transcoding
+- QuickSync on 12th/13th gen Intel is mature and well-supported
+- Handles 2x simultaneous 1080p transcodes without breaking a sweat
+
+**Configuration**:
+- Plex container deployed via Unraid Community Apps
+- iGPU passthrough to container for QuickSync
+- Media library paths: `/mnt/user/media/movies/`, `/mnt/user/media/tv/`, etc.
+- Transcode temp: `/mnt/user/appdata/plex/transcodes/` (local Unraid directory)
+
+<Note>
+Radeon 680M iGPU on MS-A2 is available for future use (ML workloads, additional transcoding) but QuickSync is the better choice for Plex.
+</Note>
+
+---
+
+## Backup Architecture
+
+See [Backup Strategy](/operations/backups) for full details. Storage-specific summary:
+
+### ZFS Snapshots (Tier 2)
+
+**Scope**: Unraid ZFS mirror pool only (`backups` and `photos` shares)
+
+**Schedule**: Hourly snapshots, 24-hour retention + daily snapshots, 7-day retention
+
+**Purpose**: Point-in-time recovery for precious data
+
+### Synology ABB (Tier 3)
+
+**Method**: Synology Active Backup for Business pulls from Unraid nightly
+
+**Credentials**: Read-only NFS mounts to Unraid shares
+
+**Destination**: Synology NAS with 4x SkyHawk 6TB drives (cold backup storage)
+
+**Purpose**: Off-box cold copy. Air-gapped from primary NAS.
+
+---
+
+## Storage Expansion Plan
+
+Current capacity: ~36TB usable on parity array + ~4TB usable on ZFS pool
+
+**Future Expansion Options**:
+1. Add 2x WD Red Plus 4TB to parity array as data drives (+8TB usable)
+2. Add 2x IronWolf 6TB to parity array as data drives (+12TB usable)
+3. Replace 12TB parity drives with larger drives, then convert old parity to data
+4. Add NVMe cache pool (2x 512GB BTRFS RAID1) if workload emerges
+
+<Note>
+Expansion is intentionally deferred. Current capacity handles all media + downloads with headroom. Don't buy hardware to solve a problem you don't have.
+</Note>
+
+---
+
+## Key Storage Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|--------|
+| NAS platform | Unraid 7.2.4 | Hybrid ZFS+parity fits risk tolerance; mixed drive sizes; ZFS where it counts |
+| Cache pool | Not installed at launch | Downloads bypass cache (hardlink rule); no real workload justifies it |
+| Downloads share | Parity array direct — no cache | Downloads and media must be on same filesystem. Cache breaks hardlinks. |
+| Dual parity | Yes (2 parity drives) | 5+ data drives warrants dual parity; single parity is a risk |
+| Plex deployment | Unraid native Docker | QuickSync via i5-13400 iGPU; no NFS hop; simpler than VM passthrough |
+| UID/GID | 2000:2000 for services | Clean break from v2; fresh NFS exports; no migration of old ownership mess |
+
+See [Architecture Decisions](/architecture/decisions) for full decision log with context.

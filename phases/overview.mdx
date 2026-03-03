@@ -1,0 +1,101 @@
+---
+title: "Build Phases Overview"
+description: "Phased approach to building the homelab infrastructure from hardware to production services"
+icon: "road"
+---
+
+## Philosophy
+
+v3.0 is a **clean-slate rebuild** with institutional knowledge from v2. Every decision is deliberate, documented, and built toward future goals (Kubernetes, GitOps, HA). Where v2 evolved organically, v3 is designed intentionally.
+
+### Design Principles
+
+| Principle | Applied In v2? | v3 Commitment |
+|-----------|----------------|---------------|
+| Bare-metal NAS separation | No (TrueNAS as VM) | Dedicated NAS host |
+| Proxmox OS redundancy | No (single NVMe) | Mirrored NVMe boot |
+| Proper VLAN segmentation with rules | Partial (no FW rules) | Full inter-VLAN firewall |
+| UPS protection | No | Required before power-on |
+| Kubernetes-ready architecture | No | Designed for future k3s |
+
+## Phased Build Approach
+
+Phases are **sequential**. Each phase has clear entry criteria (what must be true before starting) and exit criteria (what must be true to consider the phase done). **Do not skip phases.**
+
+<CardGroup cols={2}>
+  <Card title="Phase 0 — Procurement" icon="box" href="/phases/phase-0-procurement">
+    Hardware acquisition and physical rack build
+  </Card>
+  <Card title="Phase 1 — Network" icon="network-wired" href="/phases/phase-1-network">
+    VLANs, firewall rules, and network foundation
+  </Card>
+  <Card title="Phase 2 — NAS" icon="hard-drive" href="/phases/phase-2-nas">
+    Unraid build and storage commissioning
+  </Card>
+  <Card title="Phase 3 — Proxmox" icon="server" href="/phases/phase-3-proxmox">
+    Proxmox cluster and core VM infrastructure
+  </Card>
+  <Card title="Phase 4 — Services" icon="arrows-turn-to-dots" href="/phases/phase-4-services">
+    Service migration from v2 to v3
+  </Card>
+  <Card title="Phase 5 — Hardening" icon="shield-check" href="/phases/phase-5-hardening">
+    Operational hardening and validation
+  </Card>
+  <Card title="Phase 6 — Kubernetes" icon="cubes" href="/phases/phase-6-kubernetes">
+    Future k3s deployment (sandbox first)
+  </Card>
+</CardGroup>
+
+## Phase Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0 | ✅ Procurement complete | Physical build in progress |
+| Phase 1 | 🔄 Planned | Network foundation |
+| Phase 2 | 🔄 Planned | NAS commissioning |
+| Phase 3 | 🔄 Planned | Proxmox cluster setup |
+| Phase 4 | 🔄 Planned | Service migration |
+| Phase 5 | 🔄 Planned | Operational hardening |
+| Phase 6 | 📋 Future | Kubernetes learning environment |
+
+## Entry and Exit Criteria
+
+Every phase follows this structure:
+
+<Steps>
+  <Step title="Entry Criteria">
+    Prerequisites that must be met before starting the phase
+  </Step>
+  <Step title="Tasks">
+    Specific actions to complete during the phase
+  </Step>
+  <Step title="Exit Criteria">
+    Validation checkpoints that confirm phase completion
+  </Step>
+</Steps>
+
+## Migration Strategy
+
+<Info>
+**v2 services stay untouched** while v3 is built on new infrastructure. During Phase 4, services are migrated gradually per-service by flipping AdGuard DNS rewrites. No big-bang cutover.
+</Info>
+
+- v2 services currently live on **192.168.20.0** (Trusted VLAN)
+- v3 services are built on **192.168.30.0** (Services VLAN)
+- Services run in parallel until v3 is validated
+- DNS rewrites flip from v2 IPs to v3 IPs per-service
+- Instant rollback by reversing the DNS rewrite
+
+## Critical Requirements
+
+<Warning>
+**UPS Required Before Power-On**
+
+The UPS must be purchased and installed **before the NAS is powered on** with spinning rust drives. Power loss during a write on HDDs is a data corruption risk. This is non-negotiable.
+</Warning>
+
+<Warning>
+**Hardlink Rule — Downloads and Media**
+
+Downloads and media shares must **always be on the same Unraid pool/filesystem**. Never route downloads through cache while media lives on the array — this breaks hardlinks and causes silent duplication.
+</Warning>

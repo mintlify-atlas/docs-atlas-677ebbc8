@@ -1,0 +1,281 @@
+---
+title: Hardware Specifications
+description: Physical hardware inventory and specifications for all infrastructure components
+---
+
+## Physical Hosts
+
+### pve-prod-01 — Primary Compute
+
+**Role**: Primary Proxmox node. Runs all primary VMs and LXCs (docker-prod-01, auth-prod-01, immich-prod-01, dns-prod-01).
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | Minisforum MS-A2 |
+| **CPU** | AMD Ryzen 9 7945HX (16C/32T, 5.4GHz boost) |
+| **iGPU** | AMD Radeon 680M (available for future ML/transcoding) |
+| **RAM** | 32GB DDR5 SO-DIMM (1x 32GB, expandable to 96GB) |
+| **Boot Drive 1** | Samsung 980 NVMe 1TB (S/N: S64ANS0W120169T) |
+| **Boot Drive 2** | Sabrent Rocket NVMe 1TB |
+| **Boot Config** | ZFS RAID-1 mirror (configured in Proxmox installer) |
+| **LAN** | 2x 2.5GbE RJ45 built-in |
+| **Storage** | 2x 10GbE SFP+ built-in |
+| **OS** | Proxmox VE 9.1.5 |
+| **IP** | 192.168.10.11 (VLAN 10 - Management) |
+| **Source** | Amazon |
+| **Price** | $575 (Feb 2026) |
+
+<Note>
+Radeon 680M iGPU not configured at launch — Plex transcoding runs on the NAS via i5-13400 QuickSync. Available later for ML inference or additional transcoding if needed.
+</Note>
+
+**Key Design Choice**: ZFS RAID-1 mirror on boot drives fixes the main fragility from v2 (single NVMe boot). Single drive failure does not kill the hypervisor.
+
+---
+
+### nas-prod-01 — Network Attached Storage
+
+**Role**: Unraid NAS. Dual-parity array for bulk media and downloads. ZFS mirror pool for precious data (photos, backups). Plex runs here as a Docker container using QuickSync iGPU.
+
+| Component | Specification |
+|-----------|---------------|
+| **Chassis** | Rosewill RSV-L4412U (4U, 12-bay, $345) |
+| **CPU** | Intel Core i5-13400 (10C/16T — 6P + 4E cores) |
+| **iGPU** | Intel UHD 730 (QuickSync for Plex transcoding) |
+| **Motherboard** | ASUS TUF Gaming Z690-Plus WiFi D4 (ATX, DDR4, $100 used) |
+| **RAM** | 32GB DDR4 |
+| **HBA** | LSI SAS 9120-8i (migrated from previous host) |
+| **10GbE NIC** | Dell Intel X710-DA2 (dual SFP+, $28 eBay) |
+| **Onboard LAN** | Intel 2.5GbE (built-in on motherboard) |
+| **Boot** | USB flash drive (Unraid OS) |
+| **OS** | Unraid 7.2.4 |
+| **IP** | 192.168.10.10 (VLAN 10 - Management) |
+
+<Warning>
+**Motherboard Swap**: Original Gigabyte B760M DS3H DDR4 only had 1x usable PCIe slot. Could not simultaneously fit the LSI HBA (x8 card) and 10GbE NIC (needs x4 minimum). ASUS TUF Z690 has a second x16 slot wired at x4 from the chipset, solving the conflict.
+</Warning>
+
+**Design Choices**:
+- **i5-13400 over i5-13600**: Unraid is IO-bound, not compute-bound. Performance delta irrelevant. Sold i5-13600 to offset MS-A2 cost.
+- **32GB RAM**: No heavy VM workloads on Unraid. 32GB is generous for pure NAS duty. Sold extra 2x 16GB sticks.
+- **X710-DA2 over X520**: Newer chipset, better long-term driver support, dual port for future flexibility.
+
+---
+
+### pve-prod-02 — Secondary Compute
+
+**Role**: Secondary Proxmox node. Runs PBS VM (pbs-prod-01) and secondary AdGuard LXC (dns-prod-02).
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | Dell Optiplex 3070 Micro |
+| **CPU** | Intel Core i5-9500T (6C/6T, 9th gen) |
+| **RAM** | 16GB DDR4 SO-DIMM (2x 8GB Micron) |
+| **Boot Storage** | 256GB NVMe |
+| **Networking** | 1x GbE RJ45 built-in |
+| **OS** | Proxmox VE |
+| **IP** | 192.168.10.12 (VLAN 10 - Management) |
+| **Source** | Work surplus (free) |
+
+<Note>
+RAM left at 16GB for now — workload is light (PBS VM + one AdGuard LXC). Single NVMe boot is acceptable given this node's non-critical secondary role.
+</Note>
+
+**Why Not Build a Matched Second Node?**
+
+HA (High Availability) is NOT enabled. The Optiplex cannot absorb MS-A2's workload anyway. Building a second powerful node means higher idle power draw and cost for no meaningful gain. Selling spare i5-13600 and extra RAM recoups ~$250-300.
+
+---
+
+### pi-prod-01 — Monitoring / QDevice
+
+**Role**: Lightweight always-on device. Runs Proxmox QDevice (cluster tiebreaker), Uptime Kuma, and Beszel monitoring server.
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | Raspberry Pi 4B |
+| **RAM** | 4GB |
+| **Boot Storage** | SD card |
+| **Networking** | 1x GbE RJ45 built-in |
+| **OS** | Raspberry Pi OS |
+| **IP** | 192.168.10.20 (VLAN 10 - Management) |
+| **Source** | Microcenter ~2023 |
+
+<Note>
+Secondary AdGuard moved off the Pi compared to v2 — now runs as an LXC on pve-prod-02 (dns-prod-02). Pi is dedicated to QDevice + monitoring only.
+</Note>
+
+**QDevice Role**: Acts as tiebreaker for the 2-node Proxmox cluster to prevent split-brain. Lightweight setup (10-minute install), meaningful reliability value.
+
+---
+
+## Network Hardware
+
+### UDM-SE — Router / Firewall
+
+**Role**: Primary router, firewall, UniFi controller, DHCP server, WireGuard VPN endpoint.
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | UniFi Dream Machine Special Edition (UDM-SE) |
+| **IP** | 192.168.10.1 (VLAN 10 - Management, gateway) |
+| **Rack Position** | U1 |
+| **Source** | Existing — carried forward from v2 |
+
+---
+
+### Core Switch
+
+**Role**: Managed 2.5GbE switch. VLAN trunking to all hosts.
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | UniFi USW-Pro-Max-24 |
+| **Ports** | 16x 2.5GbE RJ45 + 8x 2.5GbE RJ45 + 2x 10GbE SFP+ |
+| **IP** | 192.168.10.2 (VLAN 10 - Management) |
+| **Rack Position** | U3 |
+| **Source** | Reddit r/homelabsales |
+| **Price** | $560 bundled with StarTech rack |
+
+**Why 2.5GbE?** Future-proofs LAN connections — all current hosts support 2.5GbE or better. SFP+ uplink ports used for DAC connections to UDM-SE and MS-A2.
+
+---
+
+## Power & Protection
+
+### UPS
+
+**Role**: Protects full stack from power loss. USB-connected to nas-prod-01 for NUT graceful shutdown.
+
+| Component | Specification |
+|-----------|---------------|
+| **Model** | Tripp-Lite SMART1500LCDXL |
+| **Capacity** | 1500VA / 900W |
+| **Battery-Backed Outlets** | 8 (5 used, 3 spare) |
+| **USB Interface** | Yes — NUT server runs on nas-prod-01 |
+| **Rack Position** | U18 (bottom) |
+| **Price** | ~$145 |
+
+**Graceful Shutdown Flow**:
+1. NUT server on nas-prod-01, NUT clients on pve-prod-01 and pve-prod-02
+2. On low-battery signal: Proxmox VMs and LXCs shut down first
+3. Hypervisors shut down
+4. Unraid shuts down last
+
+<Warning>
+First hardware purchased — non-negotiable before spinning up any HDDs. Power loss during a write on HDDs is a data corruption risk.
+</Warning>
+
+---
+
+## Rack Layout
+
+**Model**: StarTech 4POSTRACK18U (18U open-frame, bundled with switch for $560)
+
+```
+U1  │ UniFi UDM-SE              │ Router / Firewall
+U2  │ UniFi UP-PATCH-24         │ Patch Panel (keystone)
+U3  │ UniFi USW-Pro-Max-24      │ Core Switch
+U4  │ Brush Panel               │ Cable management
+U5  │ Minisforum MS-A2          │ pve-prod-01 (2U bracket)
+U6  │ Minisforum MS-A2          │ ↑ continued
+U7  │ Dell Optiplex + Pi        │ pve-prod-02 + pi-prod-01 (shared shelf)
+U8  │ Rosewill RSV-L4412U       │ nas-prod-01 (4U chassis)
+U9  │ Rosewill RSV-L4412U       │ ↑
+U10 │ Rosewill RSV-L4412U       │ ↑
+U11 │ Rosewill RSV-L4412U       │ ↑
+U12-U17 │ [Empty]               │ Future expansion (6U available)
+U18 │ Tripp-Lite UPS            │ Power protection
+```
+
+---
+
+## Interconnects & Cabling
+
+### DAC Cables
+
+| Length | Route | Purpose | Price |
+|--------|-------|---------|-------|
+| 0.5M | UDM-SE SFP+ → Switch SFP+ | WAN uplink | ~$10 (10Gtek) |
+| 1M | Switch SFP+ → MS-A2 SFP+ | VM/LXC LAN traffic | ~$15 (Cable Matters) |
+| 2M | NAS SFP+ → MS-A2 SFP+ | Storage traffic (dedicated) | ~$17 (Cable Matters) |
+
+<Note>
+2M cable for NAS ↔ MS-A2 accounts for RSV-L4412U sliding rail extension slack (~1.5M path + margin). Storage traffic is intentionally kept off the LAN switch — dedicated 10GbE link preserves full bandwidth.
+</Note>
+
+### RJ45 Uplinks to Switch
+
+| Device | Port Type | Purpose |
+|--------|-----------|----------|
+| UDM-SE | 2.5GbE RJ45 | LAN downlink to switch |
+| MS-A2 | 2.5GbE RJ45 | VM/LXC LAN traffic |
+| nas-prod-01 | 2.5GbE RJ45 | Management + Synology replication |
+| pve-prod-02 | 1GbE RJ45 | All traffic |
+| pi-prod-01 | 1GbE RJ45 | Management |
+
+### Patch Panel
+
+**Model**: UniFi UP-PATCH-24 (keystone style) at U2
+- 7 wall runs terminate via Cat6 shielded keystone couplers
+- Remaining 17 ports filled with blank inserts
+- 0.5ft Monoprice SlimRun Cat6 patch cables from panel (U2) to switch (U3)
+
+---
+
+## Drive Inventory
+
+See [Storage Architecture](/architecture/storage) for full pool layout and assignment. Summary:
+
+| Drive | Count | Type | Role |
+|-------|-------|------|------|
+| WD Red Pro 12TB | 5 | CMR NAS | 2x parity + 3x data (parity array) |
+| WD Red Plus 4TB | 5 | CMR NAS | 2x ZFS mirror + 2x future expansion + 1x spare |
+| Seagate IronWolf 6TB | 2 | CMR NAS | Hot spares / future array expansion |
+| Seagate SkyHawk 6TB | 4 | Surveillance | Cold backup storage in Synology only |
+| Seagate Barracuda 4TB | 1 | Desktop | Retired — not suitable for 24/7 NAS |
+
+<Warning>
+SkyHawk drives use surveillance firmware — not appropriate for NAS parity array. Barracuda is a desktop drive not rated for always-on duty. Neither belongs in the production array.
+</Warning>
+
+---
+
+## UPS Outlet Map
+
+Tripp-Lite SMART1500LCDXL has 8 battery-backed outlets:
+
+| Outlet | Device | Notes |
+|--------|--------|-------|
+| 1 | UDM-SE | |
+| 2 | USW-Pro-Max-24 | |
+| 3 | pve-prod-01 (MS-A2) | |
+| 4 | pve-prod-02 (Optiplex) | |
+| 5 | nas-prod-01 | USB cable to UPS for NUT |
+| 6 | pi-prod-01 | Via USB-C power adapter |
+| 7-8 | [Spare] | Available for future devices |
+
+---
+
+## Total Build Cost
+
+| Component | Cost |
+|-----------|------|
+| Minisforum MS-A2 | $575 |
+| Rosewill RSV-L4412U Chassis | $345 |
+| ASUS TUF Z690 Motherboard | $100 |
+| StarTech Rack + USW-Pro-Max-24 | $560 |
+| Tripp-Lite UPS | $145 |
+| Dell X710-DA2 10GbE NIC | $28 |
+| DAC Cables (3x) | ~$42 |
+| Patch Panel + Cables | ~$60 |
+| **Total** | **~$1,855** |
+
+**Offset by sales**:
+- i5-13600: ~$150
+- Extra 32GB DDR4: ~$100
+- **Net Cost**: ~$1,605
+
+<Note>
+Does not include drives (reused from v2) or Optiplex (free from work).
+</Note>

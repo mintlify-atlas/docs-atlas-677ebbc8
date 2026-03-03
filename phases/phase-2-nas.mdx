@@ -1,0 +1,194 @@
+---
+title: "Phase 2 — NAS Build & Storage Commissioning"
+description: "Unraid installation, pool configuration, and storage validation"
+icon: "hard-drive"
+---
+
+<Info>
+**Status:** Planned
+
+**Category:** Core Infrastructure
+</Info>
+
+## Objective
+
+Build Unraid from scratch, create all pools, configure shares, validate NFS exports and permissions before any services depend on it.
+
+## Entry Criteria
+
+<Check>
+  Phase 1 complete — NAS physically assembled and on Services VLAN
+</Check>
+
+## Unraid Pool Layout
+
+### Parity Array — Bulk Media & Downloads
+
+- **2x WD Red Pro 12TB** as dual parity drives
+- **3x WD Red Pro 12TB** as data drives (~36TB usable)
+- **Filesystem:** XFS per-disk (Unraid default — do not use BTRFS for array)
+- **Shares:** media (TV, movies, anime, books), downloads (all categories)
+- **Expandable:** 2x WD Red Plus 4TB and 2x IronWolf 6TB available as additional data drives when needed
+
+<Warning>
+**Downloads Share — No Cache**
+
+Downloads share writes **DIRECTLY to parity array** — no cache involvement. This is mandatory to keep downloads and media on same filesystem so hardlinks and atomic moves work.
+</Warning>
+
+### ZFS Mirror Pool — Precious Data
+
+- **2x WD Red Plus 4TB** in ZFS mirror (~4TB usable)
+- **Shares:** backups, photos (Immich library)
+- **ZFS snapshots enabled** — same data integrity guarantees as TrueNAS had for these datasets
+- **1x WD Red Plus 4TB** kept as cold spare for this pool
+
+### Cache Pool — Not Installed at Launch
+
+<Info>
+No cache pool at initial build. Workload does not justify it.
+
+If added later: 2x 512GB NVMe, BTRFS RAID1 mirrored. Would handle only small random-write workloads — **never downloads, never container appdata**.
+</Info>
+
+## Tasks
+
+<Steps>
+  <Step title="Install Unraid">
+    - Install Unraid 7.2.3 (USB flash boot)
+    - Configure hostname: `nas-prod-01`
+    - Set static IP: 192.168.10.10 (Management VLAN)
+  </Step>
+  
+  <Step title="Configure Parity Array">
+    - 2x 12TB WD Red Pro parity drives
+    - 3x 12TB WD Red Pro data drives
+    - Start parity build (will take 24-48 hours)
+  </Step>
+  
+  <Step title="Configure ZFS Mirror Pool">
+    - 2x 4TB WD Red Plus in ZFS mirror
+    - Enable ZFS snapshots
+  </Step>
+  
+  <Step title="Create Shares">
+    - **media** — parity array, no cache
+    - **downloads** — parity array, no cache (critical for hardlinks)
+    - **photos** — ZFS mirror pool
+    - **backups** — ZFS mirror pool
+    - **appdata** — parity array
+    - **isos** — parity array
+  </Step>
+  
+  <Step title="Set Share Permissions">
+    - UID/GID `2000:2000` read/write on all service shares
+    - Configure NFS exports for all shares
+  </Step>
+  
+  <Step title="Verify 10GbE Link">
+    - Verify 10GbE DAC link to MS-A2 is up and passing traffic
+    - Test throughput with iperf3
+  </Step>
+  
+  <Step title="Test NFS Mount">
+    - Mount NFS from a Linux VM
+    - Verify read/write and correct `2000:2000` ownership
+  </Step>
+  
+  <Step title="Enable Plex on Unraid">
+    - Install Plex Docker container on Unraid
+    - Configure QuickSync iGPU passthrough to container (Intel UHD 730)
+    - Verify hardware transcoding enabled in Plex settings
+  </Step>
+  
+  <Step title="Configure NUT Server">
+    - Install NUT server on Unraid via Community Apps
+    - Connect UPS USB to nas-prod-01
+    - Verify NUT detects UPS and shows battery/status
+    - Configure shutdown thresholds (e.g. trigger shutdown at 20% battery or after 5 min on battery)
+  </Step>
+  
+  <Step title="Begin Media Migration">
+    Copy → verify → do not delete until confirmed. Start with small subset to validate.
+  </Step>
+</Steps>
+
+## Share & Directory Layout
+
+### Unraid NAS Shares (/mnt/user/)
+
+| Share | Pool | NAS Path | Contents |
+|-------|------|----------|----------|
+| media | Parity Array | /mnt/user/media | All media — movies (1080p+4K), TV, anime, books |
+| downloads | Parity Array | /mnt/user/downloads | Active download staging for all categories |
+| photos | ZFS Mirror | /mnt/user/photos | Immich library (irreplaceable — ZFS protected) |
+| backups | ZFS Mirror | /mnt/user/backups | PBS backups, Docker appdata, Plex DB, Proxmox dumps |
+| appdata | Parity Array | /mnt/user/appdata | Docker/app config from NAS perspective |
+| isos | Parity Array | /mnt/user/isos | Proxmox ISO images |
+
+<Warning>
+**Hardlink Rule**
+
+Downloads and media shares must **always be on the same Unraid pool/filesystem**. Never route downloads through cache while media lives on the array — this breaks hardlinks and causes silent duplication. Downloads share = parity array direct, no exceptions.
+</Warning>
+
+### Docker Host — /data Mount Structure
+
+The NAS exports `/mnt/user` via NFS. The docker-host VM mounts this as `/data`. Everything below is logical folder organization within that single mount — **one filesystem, hardlinks work everywhere**.
+
+| Path | Purpose |
+|------|----------|
+| /data/media/movies/1080p/ | Radarr (1080p) library |
+| /data/media/movies/4k/ | Radarr (4K) library |
+| /data/media/tv/ | Sonarr (TV) library |
+| /data/media/anime/ | Sonarr (Anime) library |
+| /data/media/books/ebooks/ | CWA Calibre library (canonical ebook state) |
+| /data/media/books/audiobooks/ | ABS library — Shelfmark hardlinks here |
+| /data/downloads/movies/ | qBit movie download staging |
+| /data/downloads/tv/ | qBit TV download staging |
+| /data/downloads/anime/ | qBit anime download staging |
+| /data/downloads/books/ebooks/downloads/ | qBit ebook downloads — seeds from here |
+| /data/downloads/books/ebooks/ingest/ | Shelfmark hardlinks here → CWA ingests + deletes hardlink |
+| /data/photos/ | Immich photo library (ZFS mirror pool) |
+
+## UID/GID Strategy
+
+- **Service UID/GID:** `2000:2000` (clean break from v2 — fresh NFS exports, fresh ownership)
+- **Human user (gio):** `1000:1000`
+- All containers interacting with NFS/SMB mounts must run as `PUID=2000 PGID=2000`
+- NAS share permissions set to allow `2000:2000` read/write on all service shares
+- Clean separation: no services run as root, no more gio ownership of datasets
+
+## Exit Criteria
+
+<AccordionGroup>
+  <Accordion title="All pools created and healthy" icon="check">
+    - Parity array: 2 parity drives + 3 data drives
+    - ZFS mirror pool: 2x 4TB in mirror
+    - Parity build complete (no errors)
+    - ZFS pool healthy (zpool status)
+  </Accordion>
+  
+  <Accordion title="NFS mounts tested and working" icon="network-wired">
+    - Test VM can mount /mnt/user via NFS
+    - Read/write verified
+    - Ownership shows `2000:2000`
+  </Accordion>
+  
+  <Accordion title="Media data migrated and verified" icon="database">
+    - Media copied from old TrueNAS pool
+    - File counts match
+    - Spot-check: files play correctly in Plex
+  </Accordion>
+  
+  <Accordion title="Snapshots running on ZFS pool" icon="clock">
+    - Snapshot schedule configured (hourly, daily, weekly)
+    - First snapshots created successfully
+  </Accordion>
+</AccordionGroup>
+
+## Next Phase
+
+<Card title="Phase 3 — Proxmox Rebuild & Core VM Infrastructure" icon="server" href="/phases/phase-3-proxmox">
+  Proxmox cluster setup and core VMs
+</Card>
