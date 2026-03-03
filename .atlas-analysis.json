@@ -1,0 +1,98 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Homelab v3",
+  "projectDescription": "Comprehensive homelab documentation covering architecture, infrastructure, services, and phased deployment.",
+  "theme": "aspen",
+  "primaryColor": "#3b82f6",
+  "lightColor": "#60a5fa",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "design-philosophy"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/hardware",
+              "architecture/network",
+              "architecture/storage",
+              "architecture/compute",
+              "architecture/decisions"
+            ]
+          },
+          {
+            "group": "Services",
+            "pages": [
+              "services/overview",
+              "services/infrastructure",
+              "services/media",
+              "services/books",
+              "services/photos",
+              "services/monitoring"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/backup-restore",
+              "operations/monitoring",
+              "operations/drive-replacement",
+              "operations/proxmox-updates",
+              "operations/new-service"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Build Phases",
+        "groups": [
+          {
+            "group": "Deployment",
+            "pages": [
+              "phases/overview",
+              "phases/phase-0-procurement",
+              "phases/phase-1-network",
+              "phases/phase-2-nas",
+              "phases/phase-3-proxmox",
+              "phases/phase-4-services",
+              "phases/phase-5-hardening",
+              "phases/phase-6-kubernetes"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Dual-node Proxmox cluster with QDevice tiebreaker",
+    "Unraid NAS with ZFS mirror + parity array hybrid storage",
+    "Multi-VLAN network with firewall segmentation",
+    "Comprehensive media automation stack (Sonarr, Radarr, Plex)",
+    "Split-horizon DNS with AdGuard Home redundancy",
+    "Traefik reverse proxy with wildcard TLS",
+    "Authentik SSO identity provider",
+    "Immich photo management",
+    "Multi-tier backup strategy with PBS and off-site replication",
+    "Future Kubernetes (k3s) migration path"
+  ],
+  "publicApiSurface": [
+    "Proxmox VE cluster (pve-prod-01, pve-prod-02)",
+    "Unraid NAS (nas-prod-01)",
+    "Docker host VM (docker-prod-01)",
+    "Authentik IdP (auth-prod-01)",
+    "Immich VM (immich-prod-01)",
+    "Proxmox Backup Server (pbs-prod-01)",
+    "AdGuard Home LXCs (dns-prod-01, dns-prod-02)",
+    "VLANs: Management (10), Trusted (20), Services (30), IoT (40)",
+    "Services: Plex, Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Audiobookshelf, Calibre-Web, Shelfmark, Traefik, Cloudflare Tunnel"
+  ]
+}
